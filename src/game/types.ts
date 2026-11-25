@@ -165,6 +165,19 @@ export interface LevelConfig {
   atmosphere: LevelAtmosphere;
 }
 
+export interface HudMatchResult {
+  matchId: number;
+  levelId: number;
+  playerRole: TeamRole;
+  playerWon: boolean;
+  playerCaught: boolean;
+  timeRemaining: number;
+  remainingHiders: number;
+  totalHiders: number;
+  caughtCount: number;
+  isOnline: boolean;
+}
+
 export interface HudSnapshot {
   phase: GamePhase;
   playerRole: TeamRole;
@@ -196,6 +209,7 @@ export interface HudSnapshot {
   levelName: string;
   difficultyLabel: string;
   webglError: string | null;
+  matchResult: HudMatchResult | null;
 }
 
 export interface BoxCollider {

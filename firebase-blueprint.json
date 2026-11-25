@@ -1,0 +1,764 @@
+{
+  "entities": {
+    "PlayerProfile": {
+      "title": "Player Profile & Statistics",
+      "description": "Stores a player's chosen username, curated village avatar ID, match statistics, win streak, level unlocks, and per-level star ratings synced across devices.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the profile owner."
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Player-chosen display username."
+        },
+        "avatarId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9_\\-]+$",
+          "description": "Selected profile picture preset identifier."
+        },
+        "matchesPlayed": {
+          "type": "integer",
+          "description": "Total matches played across solo and online rounds."
+        },
+        "matchesWon": {
+          "type": "integer",
+          "description": "Total matches won."
+        },
+        "matchesLost": {
+          "type": "integer",
+          "description": "Total matches lost."
+        },
+        "timesAsSeeker": {
+          "type": "integer",
+          "description": "Number of matches played in the Seeker role."
+        },
+        "successfulHidingRounds": {
+          "type": "integer",
+          "description": "Number of rounds survived or won as a Hider."
+        },
+        "currentWinStreak": {
+          "type": "integer",
+          "description": "Current consecutive match wins."
+        },
+        "bestWinStreak": {
+          "type": "integer",
+          "description": "Highest consecutive win streak achieved."
+        },
+        "unlockedLevel": {
+          "type": "integer",
+          "description": "Highest unlocked map level from 1 to 8."
+        },
+        "completedLevels": {
+          "type": "array",
+          "description": "List of completed map IDs (integers 1 through 8)."
+        },
+        "levelStars": {
+          "type": "object",
+          "description": "Map of level ID strings ('1' through '8') to best earned star rating (1 to 3)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the cloud profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest cloud profile sync."
+        }
+      },
+      "required": [
+        "uid",
+        "username",
+        "avatarId",
+        "matchesPlayed",
+        "matchesWon",
+        "matchesLost",
+        "timesAsSeeker",
+        "successfulHidingRounds",
+        "currentWinStreak",
+        "bestWinStreak",
+        "unlockedLevel",
+        "completedLevels",
+        "levelStars",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "DirectoryEntry": {
+      "title": "Public Player Directory Entry",
+      "description": "Non-PII searchable player entry storing username, lowercase search handle, avatar ID, and live online presence.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the player."
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Display username visible to friends and search."
+        },
+        "usernameLower": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Lowercase username used for prefix search queries."
+        },
+        "avatarId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9_\\-]+$",
+          "description": "Avatar preset ID, or 'private' when profile details are hidden from strangers."
+        },
+        "isOnline": {
+          "type": "boolean",
+          "description": "Public online status visible in directory search (false when appearing offline or hiding profile from strangers)."
+        },
+        "friendRequestPolicy": {
+          "type": "string",
+          "enum": ["everyone", "nobody"],
+          "description": "Who can send friend requests to this player."
+        },
+        "roomInvitePolicy": {
+          "type": "string",
+          "enum": ["friends", "nobody"],
+          "description": "Who can send multiplayer room invites to this player."
+        },
+        "hideProfileFromStrangers": {
+          "type": "boolean",
+          "description": "When true, hides avatar and live online status from non-friends in search."
+        },
+        "lastSeenAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest heartbeat or sign-out."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when directory record was updated."
+        }
+      },
+      "required": [
+        "uid",
+        "username",
+        "usernameLower",
+        "avatarId",
+        "isOnline",
+        "friendRequestPolicy",
+        "roomInvitePolicy",
+        "hideProfileFromStrangers",
+        "lastSeenAt",
+        "updatedAt"
+      ]
+    },
+    "PrivacySettings": {
+      "title": "Player Privacy & Safety Settings",
+      "description": "Owner-only privacy and safety preferences synced across devices.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the settings owner."
+        },
+        "friendRequestPolicy": {
+          "type": "string",
+          "enum": ["everyone", "nobody"],
+          "description": "Controls who can send friend requests."
+        },
+        "roomInvitePolicy": {
+          "type": "string",
+          "enum": ["friends", "nobody"],
+          "description": "Controls who can invite this player to multiplayer rooms."
+        },
+        "appearOffline": {
+          "type": "boolean",
+          "description": "When true, player appears offline to everyone including friends."
+        },
+        "hideProfileFromStrangers": {
+          "type": "boolean",
+          "description": "When true, hides avatar and live online status from non-friends."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest privacy settings update."
+        }
+      },
+      "required": [
+        "uid",
+        "friendRequestPolicy",
+        "roomInvitePolicy",
+        "appearOffline",
+        "hideProfileFromStrangers",
+        "updatedAt"
+      ]
+    },
+    "PresenceStatus": {
+      "title": "Friends-Only Presence Status",
+      "description": "Live online status readable only by the owner and confirmed friends.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the player."
+        },
+        "isOnline": {
+          "type": "boolean",
+          "description": "Live online indicator for friends (always false when appearOffline is enabled)."
+        },
+        "lastSeenAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest heartbeat."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of presence update."
+        }
+      },
+      "required": ["uid", "isOnline", "lastSeenAt", "updatedAt"]
+    },
+    "FriendEdge": {
+      "title": "Friend List Entry",
+      "description": "Stored under a user's private friends subcollection representing a confirmed friendship.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Friend's Firebase Auth UID."
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Cached username of the friend."
+        },
+        "avatarId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9_\\-]+$",
+          "description": "Cached avatar ID of the friend."
+        },
+        "addedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the friendship was confirmed."
+        }
+      },
+      "required": ["uid", "username", "avatarId", "addedAt"]
+    },
+    "BlockedUser": {
+      "title": "Blocked Player Entry",
+      "description": "Stored under a user's private blocked subcollection to prevent requests and invites from blocked users.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Blocked user's Firebase Auth UID."
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Display name at time of blocking."
+        },
+        "avatarId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9_\\-]+$",
+          "description": "Avatar ID at time of blocking."
+        },
+        "blockedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when user was blocked."
+        }
+      },
+      "required": ["uid", "username", "avatarId", "blockedAt"]
+    },
+    "FriendRequest": {
+      "title": "Friend Request",
+      "description": "Pending, accepted, or declined friend request between two authenticated players.",
+      "type": "object",
+      "properties": {
+        "fromUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Sender UID."
+        },
+        "fromUsername": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Sender username."
+        },
+        "fromAvatarId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9_\\-]+$",
+          "description": "Sender avatar ID."
+        },
+        "toUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Recipient UID."
+        },
+        "toUsername": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Recipient username."
+        },
+        "toAvatarId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9_\\-]+$",
+          "description": "Recipient avatar ID."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "accepted", "declined"],
+          "description": "Request status."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when request was sent."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when request status changed."
+        }
+      },
+      "required": [
+        "fromUid",
+        "fromUsername",
+        "fromAvatarId",
+        "toUid",
+        "toUsername",
+        "toAvatarId",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "RoomInvite": {
+      "title": "Multiplayer Room Invite",
+      "description": "Direct multiplayer room code invitation sent between confirmed friends.",
+      "type": "object",
+      "properties": {
+        "fromUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Inviter UID."
+        },
+        "fromUsername": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Inviter username."
+        },
+        "fromAvatarId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9_\\-]+$",
+          "description": "Inviter avatar ID."
+        },
+        "toUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Invited friend UID."
+        },
+        "roomCode": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 8,
+          "pattern": "^[A-Z0-9]+$",
+          "description": "Multiplayer room code."
+        },
+        "levelId": {
+          "type": "integer",
+          "description": "Map level ID selected for the room (1 to 8)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "accepted", "dismissed"],
+          "description": "Invite status."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when invite was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when invite was updated."
+        }
+      },
+      "required": [
+        "fromUid",
+        "fromUsername",
+        "fromAvatarId",
+        "toUid",
+        "roomCode",
+        "levelId",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PlayerReport": {
+      "title": "Player Safety Report",
+      "description": "Immutable player safety report submitted by an authenticated user.",
+      "type": "object",
+      "properties": {
+        "reporterUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the player submitting the report."
+        },
+        "reporterUsername": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Display username of the reporter."
+        },
+        "targetUid": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]*$",
+          "description": "Optional UID of the reported player when known."
+        },
+        "targetUsername": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Username of the reported player."
+        },
+        "reason": {
+          "type": "string",
+          "enum": [
+            "inappropriate_chat",
+            "harassment",
+            "spam",
+            "cheating",
+            "impersonation",
+            "other"
+          ],
+          "description": "Selected report category."
+        },
+        "details": {
+          "type": "string",
+          "minLength": 0,
+          "maxLength": 200,
+          "description": "Optional reporter note."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["privacy_settings", "multiplayer_room", "friends_list"],
+          "description": "Where the report was submitted from."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["submitted"],
+          "description": "Initial report status."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when report was created."
+        }
+      },
+      "required": [
+        "reporterUid",
+        "reporterUsername",
+        "targetUid",
+        "targetUsername",
+        "reason",
+        "details",
+        "source",
+        "status",
+        "createdAt"
+      ]
+    },
+    "MultiplayerRoom": {
+      "title": "Multiplayer Room",
+      "description": "Authorized multiplayer room metadata protected by host and member subcollection access gates.",
+      "type": "object",
+      "properties": {
+        "roomCode": {
+          "type": "string",
+          "minLength": 4,
+          "maxLength": 8,
+          "pattern": "^[A-Z0-9]+$",
+          "description": "Room code matching the document ID."
+        },
+        "hostUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the room host."
+        },
+        "levelId": {
+          "type": "integer",
+          "description": "Selected map level ID from 1 to 8."
+        },
+        "phase": {
+          "type": "string",
+          "enum": ["lobby", "playing", "ended"],
+          "description": "Current lifecycle phase of the room."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when room was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of latest room update."
+        }
+      },
+      "required": ["roomCode", "hostUid", "levelId", "phase", "createdAt", "updatedAt"]
+    },
+    "MultiplayerRoomMember": {
+      "title": "Multiplayer Room Member",
+      "description": "Membership record stored under /rooms/{roomId}/members/{memberId} to gate room reads and member updates.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the room member."
+        },
+        "hostUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the parent room host."
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Display username inside the room."
+        },
+        "avatarId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9_\\-]+$",
+          "description": "Member avatar ID."
+        },
+        "role": {
+          "type": "string",
+          "enum": ["host", "player"],
+          "description": "Role within the room."
+        },
+        "isReady": {
+          "type": "boolean",
+          "description": "Lobby readiness indicator."
+        },
+        "joinedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when member joined."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when member state changed."
+        }
+      },
+      "required": ["uid", "hostUid", "username", "avatarId", "role", "isReady", "joinedAt", "updatedAt"]
+    },
+    "PrivateNotification": {
+      "title": "Private Player Notification",
+      "description": "Recipient-only private notification stored under /users/{userId}/notifications/{notificationId}.",
+      "type": "object",
+      "properties": {
+        "recipientUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Recipient user UID matching the parent user document."
+        },
+        "senderUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "UID of the player triggering the notification."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["friend_request", "room_invite"],
+          "description": "Notification category."
+        },
+        "refId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Referenced friendRequest or roomInvite document ID."
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "description": "Short notification message."
+        },
+        "isRead": {
+          "type": "boolean",
+          "description": "Whether the recipient has read this notification."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when notification was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when notification was updated."
+        }
+      },
+      "required": [
+        "recipientUid",
+        "senderUid",
+        "type",
+        "refId",
+        "message",
+        "isRead",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/PlayerProfile"
+      },
+      "description": "Owner-only player profile & statistics. Clients can only initialize zeroed stats and edit username/avatarId; wins, stars, and unlocked levels are system-protected."
+    },
+    "/users/{userId}/privacy/{docId}": {
+      "schema": {
+        "$ref": "#/entities/PrivacySettings"
+      },
+      "description": "Owner-only privacy and safety settings document ('settings')."
+    },
+    "/users/{userId}/presence/{docId}": {
+      "schema": {
+        "$ref": "#/entities/PresenceStatus"
+      },
+      "description": "Friends-only live presence status document ('status')."
+    },
+    "/users/{userId}/friends/{friendId}": {
+      "schema": {
+        "$ref": "#/entities/FriendEdge"
+      },
+      "description": "Confirmed friend edge stored for the owning user."
+    },
+    "/users/{userId}/blocked/{blockedId}": {
+      "schema": {
+        "$ref": "#/entities/BlockedUser"
+      },
+      "description": "Owner-only blocked player list."
+    },
+    "/users/{userId}/notifications/{notificationId}": {
+      "schema": {
+        "$ref": "#/entities/PrivateNotification"
+      },
+      "description": "Recipient-only private notifications linked to valid friend requests or room invites."
+    },
+    "/playerDirectory/{userId}": {
+      "schema": {
+        "$ref": "#/entities/DirectoryEntry"
+      },
+      "description": "Non-PII searchable username, privacy-masked public flags, and request/invite policy flags."
+    },
+    "/friendRequests/{requestId}": {
+      "schema": {
+        "$ref": "#/entities/FriendRequest"
+      },
+      "description": "Friend request documents keyed as {fromUid}__{toUid}."
+    },
+    "/roomInvites/{inviteId}": {
+      "schema": {
+        "$ref": "#/entities/RoomInvite"
+      },
+      "description": "Multiplayer room invitation documents keyed as {fromUid}__{toUid}."
+    },
+    "/rooms/{roomId}": {
+      "schema": {
+        "$ref": "#/entities/MultiplayerRoom"
+      },
+      "description": "Multiplayer rooms accessible strictly to the host and joined room members."
+    },
+    "/rooms/{roomId}/members/{memberId}": {
+      "schema": {
+        "$ref": "#/entities/MultiplayerRoomMember"
+      },
+      "description": "Multiplayer room member subcollection protected by the parent room Master Gate."
+    },
+    "/playerReports/{reportId}": {
+      "schema": {
+        "$ref": "#/entities/PlayerReport"
+      },
+      "description": "Immutable player safety reports readable only by their submitting reporter."
+    }
+  }
+}

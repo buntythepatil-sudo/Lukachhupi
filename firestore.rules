@@ -1,0 +1,1035 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string &&
+        id.size() >= 1 &&
+        id.size() <= 128 &&
+        id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidRoomCode(code) {
+      return code is string &&
+        code.size() >= 4 &&
+        code.size() <= 8 &&
+        code.matches('^[A-Z0-9]+$');
+    }
+
+    function isValidUsername(name) {
+      return name is string && name.size() >= 1 && name.size() <= 20;
+    }
+
+    function isValidAvatarId(avatarId) {
+      return avatarId is string &&
+        avatarId.size() >= 1 &&
+        avatarId.size() <= 32 &&
+        avatarId.matches('^[a-z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isBlockedEitherWay(uidA, uidB) {
+      return exists(/databases/$(database)/documents/users/$(uidA)/blocked/$(uidB)) ||
+        exists(/databases/$(database)/documents/users/$(uidB)/blocked/$(uidA));
+    }
+
+    function isFriend(ownerUid, targetUid) {
+      return exists(/databases/$(database)/documents/users/$(ownerUid)/friends/$(targetUid));
+    }
+
+    function targetAllowsFriendRequests(targetUid) {
+      return !(
+        'friendRequestPolicy' in get(/databases/$(database)/documents/playerDirectory/$(targetUid)).data &&
+        get(/databases/$(database)/documents/playerDirectory/$(targetUid)).data.friendRequestPolicy == 'nobody'
+      );
+    }
+
+    function targetAllowsRoomInvites(targetUid) {
+      return !exists(/databases/$(database)/documents/playerDirectory/$(targetUid)) ||
+        !(
+          'roomInvitePolicy' in get(/databases/$(database)/documents/playerDirectory/$(targetUid)).data &&
+          get(/databases/$(database)/documents/playerDirectory/$(targetUid)).data.roomInvitePolicy == 'nobody'
+        );
+    }
+
+    function isValidStarEntry(starsMap, levelKey) {
+      return !(levelKey in starsMap) ||
+        (starsMap[levelKey] is int &&
+          starsMap[levelKey] >= 1 &&
+          starsMap[levelKey] <= 3);
+    }
+
+    function isValidLevelStarsMap(starsMap) {
+      return starsMap is map &&
+        starsMap.size() <= 8 &&
+        starsMap.keys().hasOnly(['1', '2', '3', '4', '5', '6', '7', '8']) &&
+        isValidStarEntry(starsMap, '1') &&
+        isValidStarEntry(starsMap, '2') &&
+        isValidStarEntry(starsMap, '3') &&
+        isValidStarEntry(starsMap, '4') &&
+        isValidStarEntry(starsMap, '5') &&
+        isValidStarEntry(starsMap, '6') &&
+        isValidStarEntry(starsMap, '7') &&
+        isValidStarEntry(starsMap, '8');
+    }
+
+    function isValidLevelEntry(levelsList, idx) {
+      return levelsList.size() <= idx ||
+        (levelsList[idx] is int &&
+          levelsList[idx] >= 1 &&
+          levelsList[idx] <= 8);
+    }
+
+    function isValidCompletedLevelsList(levelsList) {
+      return levelsList is list &&
+        levelsList.size() <= 8 &&
+        isValidLevelEntry(levelsList, 0) &&
+        isValidLevelEntry(levelsList, 1) &&
+        isValidLevelEntry(levelsList, 2) &&
+        isValidLevelEntry(levelsList, 3) &&
+        isValidLevelEntry(levelsList, 4) &&
+        isValidLevelEntry(levelsList, 5) &&
+        isValidLevelEntry(levelsList, 6) &&
+        isValidLevelEntry(levelsList, 7);
+    }
+
+    function isValidPlayerProfile(data) {
+      return data.keys().hasAll([
+          'uid',
+          'username',
+          'avatarId',
+          'matchesPlayed',
+          'matchesWon',
+          'matchesLost',
+          'timesAsSeeker',
+          'successfulHidingRounds',
+          'currentWinStreak',
+          'bestWinStreak',
+          'unlockedLevel',
+          'completedLevels',
+          'levelStars',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'username',
+          'avatarId',
+          'matchesPlayed',
+          'matchesWon',
+          'matchesLost',
+          'timesAsSeeker',
+          'successfulHidingRounds',
+          'currentWinStreak',
+          'bestWinStreak',
+          'unlockedLevel',
+          'completedLevels',
+          'levelStars',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.uid) &&
+        data.uid == request.auth.uid &&
+        isValidUsername(data.username) &&
+        isValidAvatarId(data.avatarId) &&
+        data.matchesPlayed is int &&
+        data.matchesPlayed >= 0 &&
+        data.matchesPlayed <= 1000000 &&
+        data.matchesWon is int &&
+        data.matchesWon >= 0 &&
+        data.matchesWon <= 1000000 &&
+        data.matchesLost is int &&
+        data.matchesLost >= 0 &&
+        data.matchesLost <= 1000000 &&
+        data.matchesWon + data.matchesLost <= data.matchesPlayed &&
+        data.timesAsSeeker is int &&
+        data.timesAsSeeker >= 0 &&
+        data.timesAsSeeker <= data.matchesPlayed &&
+        data.successfulHidingRounds is int &&
+        data.successfulHidingRounds >= 0 &&
+        data.successfulHidingRounds <= data.matchesPlayed &&
+        data.currentWinStreak is int &&
+        data.currentWinStreak >= 0 &&
+        data.currentWinStreak <= data.matchesWon &&
+        data.bestWinStreak is int &&
+        data.bestWinStreak >= data.currentWinStreak &&
+        data.bestWinStreak <= data.matchesWon &&
+        data.unlockedLevel is int &&
+        data.unlockedLevel >= 1 &&
+        data.unlockedLevel <= 8 &&
+        isValidCompletedLevelsList(data.completedLevels) &&
+        isValidLevelStarsMap(data.levelStars) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function hasInitialZeroStats(data) {
+      return data.matchesPlayed == 0 &&
+        data.matchesWon == 0 &&
+        data.matchesLost == 0 &&
+        data.timesAsSeeker == 0 &&
+        data.successfulHidingRounds == 0 &&
+        data.currentWinStreak == 0 &&
+        data.bestWinStreak == 0 &&
+        data.unlockedLevel == 1 &&
+        data.completedLevels.size() == 0 &&
+        data.levelStars.size() == 0;
+    }
+
+    function isValidDirectoryEntry(data, userId) {
+      return data.keys().hasAll([
+          'uid',
+          'username',
+          'usernameLower',
+          'avatarId',
+          'isOnline',
+          'friendRequestPolicy',
+          'roomInvitePolicy',
+          'hideProfileFromStrangers',
+          'lastSeenAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'username',
+          'usernameLower',
+          'avatarId',
+          'isOnline',
+          'friendRequestPolicy',
+          'roomInvitePolicy',
+          'hideProfileFromStrangers',
+          'lastSeenAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.uid) &&
+        data.uid == userId &&
+        data.uid == request.auth.uid &&
+        isValidUsername(data.username) &&
+        isValidUsername(data.usernameLower) &&
+        isValidAvatarId(data.avatarId) &&
+        data.isOnline is bool &&
+        data.friendRequestPolicy in ['everyone', 'nobody'] &&
+        data.roomInvitePolicy in ['friends', 'nobody'] &&
+        data.hideProfileFromStrangers is bool &&
+        (!data.hideProfileFromStrangers || (data.isOnline == false && data.avatarId == 'private')) &&
+        data.lastSeenAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPrivacySettings(data, userId, docId) {
+      return docId == 'settings' &&
+        data.keys().hasAll([
+          'uid',
+          'friendRequestPolicy',
+          'roomInvitePolicy',
+          'appearOffline',
+          'hideProfileFromStrangers',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'friendRequestPolicy',
+          'roomInvitePolicy',
+          'appearOffline',
+          'hideProfileFromStrangers',
+          'updatedAt'
+        ]) &&
+        isValidId(data.uid) &&
+        data.uid == userId &&
+        data.uid == request.auth.uid &&
+        data.friendRequestPolicy in ['everyone', 'nobody'] &&
+        data.roomInvitePolicy in ['friends', 'nobody'] &&
+        data.appearOffline is bool &&
+        data.hideProfileFromStrangers is bool &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPresenceStatus(data, userId, docId) {
+      return docId == 'status' &&
+        data.keys().hasAll(['uid', 'isOnline', 'lastSeenAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'isOnline', 'lastSeenAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        data.uid == userId &&
+        data.uid == request.auth.uid &&
+        data.isOnline is bool &&
+        data.lastSeenAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidFriendEdge(data, friendUid) {
+      return data.keys().hasAll(['uid', 'username', 'avatarId', 'addedAt']) &&
+        data.keys().hasOnly(['uid', 'username', 'avatarId', 'addedAt']) &&
+        isValidId(data.uid) &&
+        data.uid == friendUid &&
+        isValidUsername(data.username) &&
+        isValidAvatarId(data.avatarId) &&
+        data.addedAt is timestamp;
+    }
+
+    function isValidBlockedEntry(data, blockedUid) {
+      return data.keys().hasAll(['uid', 'username', 'avatarId', 'blockedAt']) &&
+        data.keys().hasOnly(['uid', 'username', 'avatarId', 'blockedAt']) &&
+        isValidId(data.uid) &&
+        data.uid == blockedUid &&
+        isValidUsername(data.username) &&
+        isValidAvatarId(data.avatarId) &&
+        data.blockedAt is timestamp;
+    }
+
+    function isValidPrivateNotification(data, userId) {
+      return data.keys().hasAll([
+          'recipientUid',
+          'senderUid',
+          'type',
+          'refId',
+          'message',
+          'isRead',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'recipientUid',
+          'senderUid',
+          'type',
+          'refId',
+          'message',
+          'isRead',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.recipientUid) &&
+        data.recipientUid == userId &&
+        isValidId(data.senderUid) &&
+        data.senderUid != data.recipientUid &&
+        data.type in ['friend_request', 'room_invite'] &&
+        isValidId(data.refId) &&
+        data.message is string &&
+        data.message.size() >= 1 &&
+        data.message.size() <= 160 &&
+        data.isRead is bool &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidFriendRequest(data) {
+      return data.keys().hasAll([
+          'fromUid',
+          'fromUsername',
+          'fromAvatarId',
+          'toUid',
+          'toUsername',
+          'toAvatarId',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'fromUid',
+          'fromUsername',
+          'fromAvatarId',
+          'toUid',
+          'toUsername',
+          'toAvatarId',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.fromUid) &&
+        isValidUsername(data.fromUsername) &&
+        isValidAvatarId(data.fromAvatarId) &&
+        isValidId(data.toUid) &&
+        data.fromUid != data.toUid &&
+        isValidUsername(data.toUsername) &&
+        isValidAvatarId(data.toAvatarId) &&
+        data.status in ['pending', 'accepted', 'declined'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidRoomInvite(data) {
+      return data.keys().hasAll([
+          'fromUid',
+          'fromUsername',
+          'fromAvatarId',
+          'toUid',
+          'roomCode',
+          'levelId',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'fromUid',
+          'fromUsername',
+          'fromAvatarId',
+          'toUid',
+          'roomCode',
+          'levelId',
+          'status',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.fromUid) &&
+        isValidUsername(data.fromUsername) &&
+        isValidAvatarId(data.fromAvatarId) &&
+        isValidId(data.toUid) &&
+        data.fromUid != data.toUid &&
+        isValidRoomCode(data.roomCode) &&
+        data.levelId is int &&
+        data.levelId >= 1 &&
+        data.levelId <= 8 &&
+        data.status in ['pending', 'accepted', 'dismissed'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidMultiplayerRoom(data, roomId) {
+      return data.keys().hasAll([
+          'roomCode',
+          'hostUid',
+          'levelId',
+          'phase',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'roomCode',
+          'hostUid',
+          'levelId',
+          'phase',
+          'createdAt',
+          'updatedAt'
+        ]) &&
+        isValidRoomCode(data.roomCode) &&
+        data.roomCode == roomId &&
+        isValidId(data.hostUid) &&
+        data.levelId is int &&
+        data.levelId >= 1 &&
+        data.levelId <= 8 &&
+        data.phase in ['lobby', 'playing', 'ended'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidRoomMember(data, memberId) {
+      return data.keys().hasAll([
+          'uid',
+          'hostUid',
+          'username',
+          'avatarId',
+          'role',
+          'isReady',
+          'joinedAt',
+          'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'uid',
+          'hostUid',
+          'username',
+          'avatarId',
+          'role',
+          'isReady',
+          'joinedAt',
+          'updatedAt'
+        ]) &&
+        isValidId(data.uid) &&
+        data.uid == memberId &&
+        isValidId(data.hostUid) &&
+        isValidUsername(data.username) &&
+        isValidAvatarId(data.avatarId) &&
+        data.role in ['host', 'player'] &&
+        data.isReady is bool &&
+        data.joinedAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPlayerReport(data) {
+      return data.keys().hasAll([
+          'reporterUid',
+          'reporterUsername',
+          'targetUid',
+          'targetUsername',
+          'reason',
+          'details',
+          'source',
+          'status',
+          'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'reporterUid',
+          'reporterUsername',
+          'targetUid',
+          'targetUsername',
+          'reason',
+          'details',
+          'source',
+          'status',
+          'createdAt'
+        ]) &&
+        isValidId(data.reporterUid) &&
+        data.reporterUid == request.auth.uid &&
+        isValidUsername(data.reporterUsername) &&
+        data.targetUid is string &&
+        data.targetUid.size() <= 128 &&
+        data.targetUid.matches('^[a-zA-Z0-9_\\-]*$') &&
+        data.targetUid != request.auth.uid &&
+        isValidUsername(data.targetUsername) &&
+        data.reason in [
+          'inappropriate_chat',
+          'harassment',
+          'spam',
+          'cheating',
+          'impersonation',
+          'other'
+        ] &&
+        data.details is string &&
+        data.details.size() <= 200 &&
+        data.source in ['privacy_settings', 'multiplayer_room', 'friends_list'] &&
+        data.status == 'submitted' &&
+        data.createdAt is timestamp;
+    }
+
+    // Owner-only private profile & progression (wins/stars/unlockedLevel are immutable to clients)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && isOwner(userId);
+      allow list: if false;
+
+      allow create: if isValidId(userId) &&
+        isOwner(userId) &&
+        isEmailVerified() &&
+        isValidPlayerProfile(incoming()) &&
+        hasInitialZeroStats(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isValidId(userId) &&
+        isOwner(userId) &&
+        isEmailVerified() &&
+        isValidPlayerProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'username',
+          'avatarId',
+          'updatedAt'
+        ]);
+
+      allow delete: if isValidId(userId) && isOwner(userId) && isEmailVerified();
+
+      // Strictly owner-only privacy & safety preferences ('settings')
+      match /privacy/{docId} {
+        allow get: if isValidId(userId) && docId == 'settings' && isOwner(userId);
+        allow list: if false;
+
+        allow create: if isValidId(userId) &&
+          isOwner(userId) &&
+          isEmailVerified() &&
+          isValidPrivacySettings(incoming(), userId, docId) &&
+          incoming().updatedAt == request.time;
+
+        allow update: if isValidId(userId) &&
+          isOwner(userId) &&
+          isEmailVerified() &&
+          isValidPrivacySettings(incoming(), userId, docId) &&
+          incoming().uid == existing().uid &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'friendRequestPolicy',
+            'roomInvitePolicy',
+            'appearOffline',
+            'hideProfileFromStrangers',
+            'updatedAt'
+          ]);
+
+        allow delete: if isValidId(userId) &&
+          docId == 'settings' &&
+          isOwner(userId) &&
+          isEmailVerified();
+      }
+
+      // Friends-only live presence status ('status') — invisible to strangers
+      match /presence/{docId} {
+        allow get: if isValidId(userId) &&
+          docId == 'status' &&
+          isSignedIn() &&
+          isEmailVerified() &&
+          (isOwner(userId) || isFriend(userId, request.auth.uid));
+        allow list: if false;
+
+        allow create: if isValidId(userId) &&
+          isOwner(userId) &&
+          isEmailVerified() &&
+          isValidPresenceStatus(incoming(), userId, docId) &&
+          incoming().lastSeenAt == request.time &&
+          incoming().updatedAt == request.time;
+
+        allow update: if isValidId(userId) &&
+          isOwner(userId) &&
+          isEmailVerified() &&
+          isValidPresenceStatus(incoming(), userId, docId) &&
+          incoming().uid == existing().uid &&
+          incoming().lastSeenAt == request.time &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'isOnline',
+            'lastSeenAt',
+            'updatedAt'
+          ]);
+
+        allow delete: if isValidId(userId) &&
+          docId == 'status' &&
+          isOwner(userId) &&
+          isEmailVerified();
+      }
+
+      // Confirmed friends list for {userId}
+      match /friends/{friendId} {
+        allow get: if isValidId(userId) && isValidId(friendId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId);
+
+        allow create: if isValidId(userId) &&
+          isValidId(friendId) &&
+          userId != friendId &&
+          isSignedIn() &&
+          isEmailVerified() &&
+          isValidFriendEdge(incoming(), friendId) &&
+          incoming().addedAt == request.time &&
+          !isBlockedEitherWay(userId, friendId) &&
+          (
+            (
+              isOwner(userId) &&
+              get(/databases/$(database)/documents/friendRequests/$(friendId + '__' + userId)).data.status == 'pending' &&
+              getAfter(/databases/$(database)/documents/friendRequests/$(friendId + '__' + userId)).data.status == 'accepted'
+            ) ||
+            (
+              request.auth.uid == friendId &&
+              get(/databases/$(database)/documents/friendRequests/$(userId + '__' + friendId)).data.status == 'pending' &&
+              getAfter(/databases/$(database)/documents/friendRequests/$(userId + '__' + friendId)).data.status == 'accepted'
+            )
+          );
+
+        allow update: if false;
+
+        allow delete: if isValidId(userId) &&
+          isValidId(friendId) &&
+          isSignedIn() &&
+          isEmailVerified() &&
+          (isOwner(userId) || request.auth.uid == friendId);
+      }
+
+      // Strictly owner-only blocked list
+      match /blocked/{blockedId} {
+        allow get: if isValidId(userId) && isValidId(blockedId) && isOwner(userId);
+        allow list: if isValidId(userId) && isOwner(userId);
+
+        allow create: if isValidId(userId) &&
+          isValidId(blockedId) &&
+          userId != blockedId &&
+          isOwner(userId) &&
+          isEmailVerified() &&
+          isValidBlockedEntry(incoming(), blockedId) &&
+          incoming().blockedAt == request.time;
+
+        allow update: if false;
+
+        allow delete: if isValidId(userId) &&
+          isValidId(blockedId) &&
+          isOwner(userId) &&
+          isEmailVerified();
+      }
+
+      // Strictly recipient-only private notifications
+      match /notifications/{notificationId} {
+        allow get: if isValidId(userId) &&
+          isValidId(notificationId) &&
+          isOwner(userId) &&
+          isEmailVerified();
+
+        allow list: if isValidId(userId) &&
+          isOwner(userId) &&
+          isEmailVerified() &&
+          resource.data.recipientUid == request.auth.uid;
+
+        allow create: if isValidId(userId) &&
+          isValidId(notificationId) &&
+          isSignedIn() &&
+          isEmailVerified() &&
+          isValidPrivateNotification(incoming(), userId) &&
+          incoming().senderUid == request.auth.uid &&
+          incoming().isRead == false &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          !isBlockedEitherWay(request.auth.uid, userId) &&
+          (
+            (
+              incoming().type == 'friend_request' &&
+              incoming().refId == request.auth.uid + '__' + userId &&
+              existsAfter(/databases/$(database)/documents/friendRequests/$(request.auth.uid + '__' + userId))
+            ) ||
+            (
+              incoming().type == 'room_invite' &&
+              incoming().refId == request.auth.uid + '__' + userId &&
+              existsAfter(/databases/$(database)/documents/roomInvites/$(request.auth.uid + '__' + userId))
+            )
+          );
+
+        allow update: if isValidId(userId) &&
+          isValidId(notificationId) &&
+          isOwner(userId) &&
+          isEmailVerified() &&
+          isValidPrivateNotification(incoming(), userId) &&
+          incoming().recipientUid == existing().recipientUid &&
+          incoming().senderUid == existing().senderUid &&
+          incoming().type == existing().type &&
+          incoming().refId == existing().refId &&
+          incoming().message == existing().message &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'isRead',
+            'updatedAt'
+          ]);
+
+        allow delete: if isValidId(userId) &&
+          isValidId(notificationId) &&
+          isOwner(userId) &&
+          isEmailVerified();
+      }
+    }
+
+    // Non-PII public username search directory & privacy policy flags
+    match /playerDirectory/{userId} {
+      allow get: if isValidId(userId) && isSignedIn() && isEmailVerified();
+      allow list: if isSignedIn() &&
+        isEmailVerified() &&
+        request.query.limit != null &&
+        request.query.limit <= 15 &&
+        resource.data.usernameLower is string &&
+        resource.data.uid is string;
+
+      allow create: if isValidId(userId) &&
+        isOwner(userId) &&
+        isEmailVerified() &&
+        isValidDirectoryEntry(incoming(), userId) &&
+        incoming().lastSeenAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isValidId(userId) &&
+        isOwner(userId) &&
+        isEmailVerified() &&
+        isValidDirectoryEntry(incoming(), userId) &&
+        incoming().uid == existing().uid &&
+        incoming().lastSeenAt == request.time &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'username',
+          'usernameLower',
+          'avatarId',
+          'isOnline',
+          'friendRequestPolicy',
+          'roomInvitePolicy',
+          'hideProfileFromStrangers',
+          'lastSeenAt',
+          'updatedAt'
+        ]);
+
+      allow delete: if isValidId(userId) && isOwner(userId) && isEmailVerified();
+    }
+
+    // Friend requests keyed by {fromUid}__{toUid}
+    match /friendRequests/{requestId} {
+      allow get: if isValidId(requestId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        (existing().fromUid == request.auth.uid || existing().toUid == request.auth.uid);
+
+      allow list: if isSignedIn() &&
+        isEmailVerified() &&
+        (resource.data.toUid == request.auth.uid || resource.data.fromUid == request.auth.uid);
+
+      allow create: if isValidId(requestId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        isValidFriendRequest(incoming()) &&
+        requestId == incoming().fromUid + '__' + incoming().toUid &&
+        incoming().fromUid == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/playerDirectory/$(incoming().toUid)) &&
+        targetAllowsFriendRequests(incoming().toUid) &&
+        !isBlockedEitherWay(incoming().fromUid, incoming().toUid) &&
+        !isFriend(incoming().fromUid, incoming().toUid);
+
+      allow update: if isValidId(requestId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        isValidFriendRequest(incoming()) &&
+        incoming().fromUid == existing().fromUid &&
+        incoming().toUid == existing().toUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        existing().status == 'pending' &&
+        (
+          (
+            request.auth.uid == existing().toUid &&
+            incoming().status == 'accepted' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']) &&
+            !isBlockedEitherWay(existing().fromUid, existing().toUid) &&
+            existsAfter(/databases/$(database)/documents/users/$(existing().toUid)/friends/$(existing().fromUid)) &&
+            existsAfter(/databases/$(database)/documents/users/$(existing().fromUid)/friends/$(existing().toUid))
+          ) ||
+          (
+            request.auth.uid == existing().toUid &&
+            incoming().status == 'declined' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          )
+        );
+
+      allow delete: if isValidId(requestId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        (
+          resource == null ||
+          existing().fromUid == request.auth.uid ||
+          existing().toUid == request.auth.uid
+        );
+    }
+
+    // Multiplayer room invites keyed by {fromUid}__{toUid}
+    match /roomInvites/{inviteId} {
+      allow get: if isValidId(inviteId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        (existing().fromUid == request.auth.uid || existing().toUid == request.auth.uid);
+
+      allow list: if isSignedIn() &&
+        isEmailVerified() &&
+        (resource.data.toUid == request.auth.uid || resource.data.fromUid == request.auth.uid);
+
+      allow create: if isValidId(inviteId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        isValidRoomInvite(incoming()) &&
+        inviteId == incoming().fromUid + '__' + incoming().toUid &&
+        incoming().fromUid == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isFriend(incoming().toUid, incoming().fromUid) &&
+        !isBlockedEitherWay(incoming().fromUid, incoming().toUid) &&
+        targetAllowsRoomInvites(incoming().toUid);
+
+      allow update: if isValidId(inviteId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        isValidRoomInvite(incoming()) &&
+        incoming().fromUid == existing().fromUid &&
+        incoming().toUid == existing().toUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          (
+            request.auth.uid == existing().toUid &&
+            existing().status == 'pending' &&
+            incoming().status in ['accepted', 'dismissed'] &&
+            incoming().roomCode == existing().roomCode &&
+            incoming().levelId == existing().levelId &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+          ) ||
+          (
+            request.auth.uid == existing().fromUid &&
+            incoming().status == 'pending' &&
+            isFriend(existing().toUid, existing().fromUid) &&
+            !isBlockedEitherWay(existing().fromUid, existing().toUid) &&
+            targetAllowsRoomInvites(existing().toUid) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'fromUsername',
+              'fromAvatarId',
+              'roomCode',
+              'levelId',
+              'status',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isValidId(inviteId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        (
+          resource == null ||
+          existing().fromUid == request.auth.uid ||
+          existing().toUid == request.auth.uid
+        );
+    }
+
+    // Multiplayer rooms — strictly accessible to host & joined members
+    match /rooms/{roomId} {
+      allow get: if isValidId(roomId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        (
+          existing().hostUid == request.auth.uid ||
+          exists(/databases/$(database)/documents/rooms/$(roomId)/members/$(request.auth.uid))
+        );
+
+      allow list: if isSignedIn() &&
+        isEmailVerified() &&
+        resource.data.hostUid == request.auth.uid;
+
+      allow create: if isValidId(roomId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        isValidMultiplayerRoom(incoming(), roomId) &&
+        incoming().hostUid == request.auth.uid &&
+        incoming().phase == 'lobby' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        existsAfter(/databases/$(database)/documents/rooms/$(roomId)/members/$(request.auth.uid));
+
+      allow update: if isValidId(roomId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        isValidMultiplayerRoom(incoming(), roomId) &&
+        existing().hostUid == request.auth.uid &&
+        existing().phase != 'ended' &&
+        incoming().roomCode == existing().roomCode &&
+        incoming().hostUid == existing().hostUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly([
+          'levelId',
+          'phase',
+          'updatedAt'
+        ]);
+
+      allow delete: if isValidId(roomId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        existing().hostUid == request.auth.uid;
+
+      // Room members subcollection gated by parent room Master Gate
+      match /members/{memberId} {
+        allow get: if isValidId(roomId) &&
+          isValidId(memberId) &&
+          isSignedIn() &&
+          isEmailVerified() &&
+          exists(/databases/$(database)/documents/rooms/$(roomId)) &&
+          (
+            get(/databases/$(database)/documents/rooms/$(roomId)).data.hostUid == request.auth.uid ||
+            exists(/databases/$(database)/documents/rooms/$(roomId)/members/$(request.auth.uid))
+          );
+
+        allow list: if isValidId(roomId) &&
+          isSignedIn() &&
+          isEmailVerified() &&
+          (resource.data.uid == request.auth.uid || resource.data.hostUid == request.auth.uid);
+
+        allow create: if isValidId(roomId) &&
+          isValidId(memberId) &&
+          isSignedIn() &&
+          isEmailVerified() &&
+          isValidRoomMember(incoming(), memberId) &&
+          incoming().uid == request.auth.uid &&
+          incoming().joinedAt == request.time &&
+          incoming().updatedAt == request.time &&
+          existsAfter(/databases/$(database)/documents/rooms/$(roomId)) &&
+          incoming().hostUid == getAfter(/databases/$(database)/documents/rooms/$(roomId)).data.hostUid &&
+          (
+            (
+              incoming().hostUid == request.auth.uid &&
+              incoming().role == 'host'
+            ) ||
+            (
+              incoming().hostUid != request.auth.uid &&
+              incoming().role == 'player' &&
+              exists(/databases/$(database)/documents/rooms/$(roomId)) &&
+              get(/databases/$(database)/documents/rooms/$(roomId)).data.phase == 'lobby' &&
+              !isBlockedEitherWay(incoming().hostUid, request.auth.uid) &&
+              exists(/databases/$(database)/documents/roomInvites/$(incoming().hostUid + '__' + request.auth.uid)) &&
+              get(/databases/$(database)/documents/roomInvites/$(incoming().hostUid + '__' + request.auth.uid)).data.roomCode == get(/databases/$(database)/documents/rooms/$(roomId)).data.roomCode &&
+              get(/databases/$(database)/documents/roomInvites/$(incoming().hostUid + '__' + request.auth.uid)).data.status in ['pending', 'accepted']
+            )
+          );
+
+        allow update: if isValidId(roomId) &&
+          isValidId(memberId) &&
+          isSignedIn() &&
+          isEmailVerified() &&
+          isValidRoomMember(incoming(), memberId) &&
+          isOwner(memberId) &&
+          exists(/databases/$(database)/documents/rooms/$(roomId)) &&
+          get(/databases/$(database)/documents/rooms/$(roomId)).data.phase != 'ended' &&
+          incoming().uid == existing().uid &&
+          incoming().hostUid == existing().hostUid &&
+          incoming().role == existing().role &&
+          incoming().joinedAt == existing().joinedAt &&
+          incoming().updatedAt == request.time &&
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'isReady',
+            'username',
+            'avatarId',
+            'updatedAt'
+          ]);
+
+        allow delete: if isValidId(roomId) &&
+          isValidId(memberId) &&
+          isSignedIn() &&
+          isEmailVerified() &&
+          (
+            isOwner(memberId) ||
+            (
+              exists(/databases/$(database)/documents/rooms/$(roomId)) &&
+              get(/databases/$(database)/documents/rooms/$(roomId)).data.hostUid == request.auth.uid
+            )
+          );
+      }
+    }
+
+    // Immutable player safety reports (reporter-readable only)
+    match /playerReports/{reportId} {
+      allow get: if isValidId(reportId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        existing().reporterUid == request.auth.uid;
+
+      allow list: if isSignedIn() &&
+        isEmailVerified() &&
+        resource.data.reporterUid == request.auth.uid;
+
+      allow create: if isValidId(reportId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        isValidPlayerReport(incoming()) &&
+        incoming().createdAt == request.time;
+
+      allow update, delete: if false;
+    }
+  }
+}

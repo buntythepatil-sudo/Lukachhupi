@@ -1,10 +1,21 @@
+import {
+  onAuthStateChanged,
+  signInWithPopup,
+  signOut,
+  User as FirebaseUser,
+} from 'firebase/auth';
+import { Timestamp } from 'firebase/firestore';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  ArrowLeft,
   ArrowUp,
+  BarChart3,
+  Bell,
   Check,
   ChevronLeft,
   ChevronRight,
   Clock,
+  Cloud,
   Compass,
   Copy,
   Crown,
@@ -18,20 +29,31 @@ import {
   MessageSquare,
   Music,
   Play,
+  Power,
   RotateCcw,
   Search,
   Send,
   ShieldCheck,
   SlidersHorizontal,
   Smile,
+  Star,
   User,
+  UserPlus,
   Users,
   Volume2,
   VolumeX,
   X,
 } from 'lucide-react';
 import { CircularMinimap } from './components/CircularMinimap';
+import { FriendsPanel } from './components/FriendsPanel';
+import {
+  PlayerProfilePanel,
+  ProfileSyncState,
+} from './components/PlayerProfilePanel';
+import { PrivacySafetyPanel } from './components/PrivacySafetyPanel';
+import { ProfileAvatar } from './components/ProfileAvatar';
 import { TouchJoystick } from './components/TouchJoystick';
+import { auth, googleProvider } from './firebase';
 import { createDefaultAudioSettings } from './game/audioEngine';
 import {
   CAMERA_MAX_SENSITIVITY,
@@ -65,7 +87,6 @@ import { ChhupanChhupaiEngine } from './game/engine';
 import {
   getLevelConfig,
   LEVEL_CONFIGS,
-  loadUnlockedLevel,
   TOTAL_LEVELS,
 } from './game/levels';
 import {
@@ -80,6 +101,62 @@ import {
   PlayerEmotePayload,
   PlayerLiveStatus,
 } from './game/multiplayerTypes';
+import {
+  acceptFriendRequest,
+  BlockedRecord,
+  blockPlayer,
+  cancelFriendRequest,
+  declineFriendRequest,
+  DirectoryPlayer,
+  FriendRecord,
+  FriendRequestRecord,
+  removeFriend,
+  respondToRoomInvite,
+  RoomInviteRecord,
+  searchPlayersByUsername,
+  sendFriendRequest,
+  sendRoomInviteToFriend,
+  subscribeBlockedUsers,
+  subscribeFriendsWithPresence,
+  subscribeIncomingFriendRequests,
+  subscribeIncomingRoomInvites,
+  subscribeOutgoingFriendRequests,
+  unblockPlayer,
+  upsertDirectoryPresence,
+} from './game/friendsService';
+import {
+  appendMatchToSyncDelta,
+  applyMatchOutcomeToProfile,
+  clampUsername,
+  clearPendingSyncDelta,
+  createDefaultPlayerProfile,
+  fetchCloudProfile,
+  getTotalEarnedStars,
+  loadLocalPlayerProfile,
+  loadPendingSyncDelta,
+  mergeCloudAndPendingDelta,
+  PlayerStatsProfile,
+  PROFILE_USERNAME_MAX_LENGTH,
+  saveCloudProfile,
+  saveCloudProfileIdentity,
+  saveLocalPlayerProfile,
+  savePendingSyncDelta,
+  subscribeToCloudProfile,
+} from './game/playerProfile';
+import {
+  createDefaultPrivacySettings,
+  deleteUserAccountAndData,
+  fetchCloudPrivacySettings,
+  loadLocalPrivacySettings,
+  PlayerReportReason,
+  PlayerReportRecord,
+  PrivacySafetySettings,
+  saveCloudPrivacySettings,
+  saveLocalPrivacySettings,
+  submitPlayerReport,
+  subscribeMySubmittedReports,
+  subscribePrivacySettings,
+} from './game/privacyService';
 import {
   AccessoryType,
   AudioSettings,
@@ -103,8 +180,17 @@ const GRAPHICS_QUALITY_OPTIONS: Array<{
   { id: 'high', label: 'High', shortLabel: 'High' },
 ];
 
-const INITIAL_CUSTOMIZATION: CharacterCustomization =
+const INITIAL_PROFILE: PlayerStatsProfile = loadLocalPlayerProfile();
+
+const BASE_CUSTOMIZATION: CharacterCustomization =
   createCustomizationFromPreset(VILLAGE_CHARACTER_PRESETS[0]);
+
+const INITIAL_CUSTOMIZATION: CharacterCustomization = {
+  ...BASE_CUSTOMIZATION,
+  name: INITIAL_PROFILE.identityCustomized
+    ? INITIAL_PROFILE.username
+    : BASE_CUSTOMIZATION.name,
+};
 
 const INITIAL_HUD: HudSnapshot = {
   phase: 'start',
@@ -132,11 +218,12 @@ const INITIAL_HUD: HudSnapshot = {
   audioSettings: createDefaultAudioSettings(),
   graphicsQuality: 'medium',
   currentLevelId: 1,
-  unlockedLevel: loadUnlockedLevel(),
+  unlockedLevel: INITIAL_PROFILE.unlockedLevel,
   newlyUnlockedLevel: null,
   levelName: LEVEL_CONFIGS[0].name,
   difficultyLabel: LEVEL_CONFIGS[0].difficultyLabel,
   webglError: null,
+  matchResult: null,
 };
 
 function formatClock(totalSeconds: number): string {
@@ -187,9 +274,67 @@ export default function App() {
   const [showCameraSettings, setShowCameraSettings] = useState(false);
   const [showAudioSettings, setShowAudioSettings] = useState(false);
   const [showOnlineRoster, setShowOnlineRoster] = useState(true);
-  const [startTab, setStartTab] = useState<'levels' | 'character' | 'online'>(
-    'levels',
+  const [startScreen, setStartScreen] = useState<
+    | 'menu'
+    | 'levels'
+    | 'character'
+    | 'online'
+    | 'settings'
+    | 'profile'
+    | 'friends'
+    | 'privacy'
+  >('menu');
+  const [privacyReturnScreen, setPrivacyReturnScreen] = useState<
+    'menu' | 'settings' | 'friends'
+  >('settings');
+  const [showQuitModal, setShowQuitModal] = useState(false);
+
+  // Player Profile, Statistics & Cross-Device Firebase Sync state
+  const [playerProfile, setPlayerProfile] =
+    useState<PlayerStatsProfile>(INITIAL_PROFILE);
+  const profileRef = useRef<PlayerStatsProfile>(INITIAL_PROFILE);
+  const [firebaseUser, setFirebaseUser] = useState<FirebaseUser | null>(null);
+  const [syncState, setSyncState] = useState<ProfileSyncState>('offline');
+  const [syncError, setSyncError] = useState<string | null>(null);
+  const [authBusy, setAuthBusy] = useState(false);
+  const [lastMatchEarnedStars, setLastMatchEarnedStars] = useState(0);
+  const cloudCreatedAtRef = useRef<Timestamp | undefined>(undefined);
+  const lastRecordedMatchIdRef = useRef<number>(0);
+
+  // Player Privacy & Safety Settings state
+  const [privacySettings, setPrivacySettings] = useState<PrivacySafetySettings>(
+    () => loadLocalPrivacySettings(),
   );
+  const privacySettingsRef = useRef<PrivacySafetySettings>(privacySettings);
+  const [submittedReports, setSubmittedReports] = useState<
+    PlayerReportRecord[]
+  >([]);
+  const [privacyNotice, setPrivacyNotice] = useState<string | null>(null);
+  const privacyNoticeTimerRef = useRef<number | null>(null);
+
+  // Friends System state (Firestore real-time friends, requests, blocklist, room invites)
+  const [friends, setFriends] = useState<FriendRecord[]>([]);
+  const [blockedUsers, setBlockedUsers] = useState<BlockedRecord[]>([]);
+  const [incomingFriendRequests, setIncomingFriendRequests] = useState<
+    FriendRequestRecord[]
+  >([]);
+  const [outgoingFriendRequests, setOutgoingFriendRequests] = useState<
+    FriendRequestRecord[]
+  >([]);
+  const [incomingRoomInvites, setIncomingRoomInvites] = useState<
+    RoomInviteRecord[]
+  >([]);
+  const [dismissedNotifyIds, setDismissedNotifyIds] = useState<
+    Record<string, boolean>
+  >({});
+  const [friendsNotice, setFriendsNotice] = useState<string | null>(null);
+  const [lobbyInvitedMap, setLobbyInvitedMap] = useState<Record<string, boolean>>(
+    {},
+  );
+  const pendingInviteFriendRef = useRef<FriendRecord | null>(null);
+  const friendsNoticeTimerRef = useRef<number | null>(null);
+  const seenRequestIdsRef = useRef<Set<string>>(new Set());
+  const requestStreamReadyRef = useRef(false);
 
   // Real-time online multiplayer room state
   const [mpStatus, setMpStatus] =
@@ -277,10 +422,413 @@ export default function App() {
         .slice(0, 6);
       if (cleaned.length >= 4) {
         setJoinCodeInput(cleaned);
-        setStartTab('online');
+        setStartScreen('online');
       }
     }
   }, []);
+
+  useEffect(() => {
+    engineRef.current?.setStartShowcaseMode(
+      startScreen === 'menu' ? 'menu' : 'panel',
+    );
+  }, [startScreen]);
+
+  useEffect(() => {
+    profileRef.current = playerProfile;
+  }, [playerProfile]);
+
+  const applyResolvedProfile = useCallback((next: PlayerStatsProfile) => {
+    profileRef.current = next;
+    setPlayerProfile(next);
+    saveLocalPlayerProfile(next);
+    engineRef.current?.setUnlockedLevel(next.unlockedLevel);
+    if (next.identityCustomized) {
+      setCustomization((prev) => ({
+        ...prev,
+        name: next.username.slice(0, 16),
+      }));
+    }
+  }, []);
+
+  const syncWithCloudAccount = useCallback(
+    async (user: FirebaseUser) => {
+      setSyncState('syncing');
+      setSyncError(null);
+      try {
+        const fetched = await fetchCloudProfile(user.uid);
+        const currentLocal = profileRef.current;
+        const pendingDelta = loadPendingSyncDelta();
+
+        if (!fetched.exists || !fetched.profile) {
+          const suggestedName = currentLocal.identityCustomized
+            ? currentLocal.username
+            : clampUsername(
+                user.displayName?.split(' ')[0] || currentLocal.username,
+              );
+          const initialCloud: PlayerStatsProfile = {
+            ...currentLocal,
+            username: suggestedName,
+            identityCustomized: true,
+          };
+          await saveCloudProfileIdentity(
+            user.uid,
+            suggestedName,
+            initialCloud.avatarId,
+          );
+          clearPendingSyncDelta();
+          const refreshed = await fetchCloudProfile(user.uid);
+          cloudCreatedAtRef.current = refreshed.createdAt;
+          applyResolvedProfile({
+            ...(refreshed.profile ?? initialCloud),
+            matchesPlayed: Math.max(
+              currentLocal.matchesPlayed,
+              refreshed.profile?.matchesPlayed ?? 0,
+            ),
+            matchesWon: Math.max(
+              currentLocal.matchesWon,
+              refreshed.profile?.matchesWon ?? 0,
+            ),
+            matchesLost: Math.max(
+              currentLocal.matchesLost,
+              refreshed.profile?.matchesLost ?? 0,
+            ),
+            timesAsSeeker: Math.max(
+              currentLocal.timesAsSeeker,
+              refreshed.profile?.timesAsSeeker ?? 0,
+            ),
+            successfulHidingRounds: Math.max(
+              currentLocal.successfulHidingRounds,
+              refreshed.profile?.successfulHidingRounds ?? 0,
+            ),
+            currentWinStreak: Math.max(
+              currentLocal.currentWinStreak,
+              refreshed.profile?.currentWinStreak ?? 0,
+            ),
+            bestWinStreak: Math.max(
+              currentLocal.bestWinStreak,
+              refreshed.profile?.bestWinStreak ?? 0,
+            ),
+            unlockedLevel: Math.max(
+              currentLocal.unlockedLevel,
+              refreshed.profile?.unlockedLevel ?? 1,
+            ),
+            completedLevels:
+              currentLocal.completedLevels.length > 0
+                ? currentLocal.completedLevels
+                : (refreshed.profile?.completedLevels ?? []),
+            levelStars:
+              Object.keys(currentLocal.levelStars).length > 0
+                ? currentLocal.levelStars
+                : (refreshed.profile?.levelStars ?? {}),
+            identityCustomized: true,
+          });
+        } else {
+          cloudCreatedAtRef.current = fetched.createdAt;
+          const merged = mergeCloudAndPendingDelta(
+            fetched.profile,
+            currentLocal,
+            pendingDelta,
+          );
+          const needsPush =
+            pendingDelta.matchesPlayed > 0 ||
+            merged.unlockedLevel > fetched.profile.unlockedLevel ||
+            merged.completedLevels.length >
+              fetched.profile.completedLevels.length;
+
+          if (needsPush) {
+            await saveCloudProfile(user.uid, merged, fetched.createdAt);
+          }
+          clearPendingSyncDelta();
+          applyResolvedProfile(merged);
+        }
+        setSyncState('synced');
+      } catch (err) {
+        setSyncState('error');
+        setSyncError(
+          err instanceof Error && err.message.includes('offline')
+            ? 'Offline: stats saved locally and will sync when connected.'
+            : 'Could not sync right now. Stats remain saved on this device.',
+        );
+      }
+    },
+    [applyResolvedProfile],
+  );
+
+  useEffect(() => {
+    privacySettingsRef.current = privacySettings;
+  }, [privacySettings]);
+
+  // Firebase Auth, Real-Time Cloud Profile Sync, Privacy & Friends Listeners
+  useEffect(() => {
+    let snapshotUnsub: (() => void) | null = null;
+    let privacyUnsub: (() => void) | null = null;
+    let reportsUnsub: (() => void) | null = null;
+    let friendsUnsub: (() => void) | null = null;
+    let blockedUnsub: (() => void) | null = null;
+    let incomingReqUnsub: (() => void) | null = null;
+    let outgoingReqUnsub: (() => void) | null = null;
+    let invitesUnsub: (() => void) | null = null;
+    let active = true;
+
+    const cleanupUserListeners = () => {
+      snapshotUnsub?.();
+      snapshotUnsub = null;
+      privacyUnsub?.();
+      privacyUnsub = null;
+      reportsUnsub?.();
+      reportsUnsub = null;
+      friendsUnsub?.();
+      friendsUnsub = null;
+      blockedUnsub?.();
+      blockedUnsub = null;
+      incomingReqUnsub?.();
+      incomingReqUnsub = null;
+      outgoingReqUnsub?.();
+      outgoingReqUnsub = null;
+      invitesUnsub?.();
+      invitesUnsub = null;
+    };
+
+    const authUnsub = onAuthStateChanged(auth, (user) => {
+      cleanupUserListeners();
+      if (!active) return;
+
+      if (!user) {
+        setFirebaseUser(null);
+        cloudCreatedAtRef.current = undefined;
+        setSyncState('offline');
+        setSyncError(null);
+        setFriends([]);
+        setBlockedUsers([]);
+        setIncomingFriendRequests([]);
+        setOutgoingFriendRequests([]);
+        setIncomingRoomInvites([]);
+        setSubmittedReports([]);
+        seenRequestIdsRef.current.clear();
+        requestStreamReadyRef.current = false;
+        return;
+      }
+
+      setFirebaseUser(user);
+      void syncWithCloudAccount(user).then(async () => {
+        if (!active || auth.currentUser?.uid !== user.uid) return;
+
+        try {
+          const cloudPrivacy = await fetchCloudPrivacySettings(user.uid);
+          if (cloudPrivacy) {
+            privacySettingsRef.current = cloudPrivacy;
+            setPrivacySettings(cloudPrivacy);
+            saveLocalPrivacySettings(cloudPrivacy);
+          } else {
+            await saveCloudPrivacySettings(
+              user.uid,
+              privacySettingsRef.current,
+            );
+          }
+        } catch {
+          // Keep local privacy settings fallback if offline
+        }
+
+        if (!active || auth.currentUser?.uid !== user.uid) return;
+        const resolved = profileRef.current;
+        void upsertDirectoryPresence(
+          user.uid,
+          resolved.username,
+          resolved.avatarId,
+          document.visibilityState !== 'hidden',
+          privacySettingsRef.current,
+        );
+
+        snapshotUnsub = subscribeToCloudProfile(
+          user.uid,
+          (remoteProfile, createdAt) => {
+            cloudCreatedAtRef.current = createdAt;
+            applyResolvedProfile(remoteProfile);
+            setSyncState('synced');
+          },
+        );
+
+        privacyUnsub = subscribePrivacySettings(user.uid, (remotePrivacy) => {
+          privacySettingsRef.current = remotePrivacy;
+          setPrivacySettings(remotePrivacy);
+          saveLocalPrivacySettings(remotePrivacy);
+        });
+
+        reportsUnsub = subscribeMySubmittedReports(
+          user.uid,
+          setSubmittedReports,
+        );
+
+        friendsUnsub = subscribeFriendsWithPresence(user.uid, setFriends);
+        blockedUnsub = subscribeBlockedUsers(user.uid, setBlockedUsers);
+        incomingReqUnsub = subscribeIncomingFriendRequests(user.uid, (reqs) => {
+          if (requestStreamReadyRef.current) {
+            const hasBrandNew = reqs.some(
+              (r) => !seenRequestIdsRef.current.has(r.id),
+            );
+            if (hasBrandNew) {
+              engineRef.current?.playUiClick();
+            }
+          } else {
+            requestStreamReadyRef.current = true;
+          }
+          for (const r of reqs) {
+            seenRequestIdsRef.current.add(r.id);
+          }
+          setIncomingFriendRequests(reqs);
+        });
+        outgoingReqUnsub = subscribeOutgoingFriendRequests(
+          user.uid,
+          setOutgoingFriendRequests,
+        );
+        invitesUnsub = subscribeIncomingRoomInvites(
+          user.uid,
+          setIncomingRoomInvites,
+        );
+      });
+    });
+
+    return () => {
+      active = false;
+      authUnsub();
+      cleanupUserListeners();
+      if (friendsNoticeTimerRef.current !== null) {
+        window.clearTimeout(friendsNoticeTimerRef.current);
+      }
+      if (privacyNoticeTimerRef.current !== null) {
+        window.clearTimeout(privacyNoticeTimerRef.current);
+      }
+    };
+  }, [applyResolvedProfile, syncWithCloudAccount]);
+
+  // Directory presence sync & live online heartbeat (respects Appear Offline & Hide Profile privacy)
+  useEffect(() => {
+    if (!firebaseUser) return;
+    const uid = firebaseUser.uid;
+
+    const pushPresence = (online: boolean) => {
+      const p = profileRef.current;
+      void upsertDirectoryPresence(
+        uid,
+        p.username,
+        p.avatarId,
+        online,
+        privacySettingsRef.current,
+      ).catch(() => {});
+    };
+
+    pushPresence(document.visibilityState !== 'hidden');
+
+    const heartbeat = window.setInterval(() => {
+      if (document.visibilityState !== 'hidden') {
+        pushPresence(true);
+      }
+    }, 45_000);
+
+    const onVisibility = () => {
+      pushPresence(document.visibilityState !== 'hidden');
+    };
+    const onPageHide = () => {
+      pushPresence(false);
+    };
+
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', onPageHide);
+
+    return () => {
+      window.clearInterval(heartbeat);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', onPageHide);
+    };
+  }, [
+    firebaseUser,
+    playerProfile.username,
+    playerProfile.avatarId,
+    privacySettings,
+  ]);
+
+  // Auto-send queued friend invite once a freshly created room code arrives
+  useEffect(() => {
+    if (!onlineRoom || !firebaseUser) return;
+    setLobbyInvitedMap({});
+    const targetFriend = pendingInviteFriendRef.current;
+    if (!targetFriend) return;
+    pendingInviteFriendRef.current = null;
+
+    void sendRoomInviteToFriend(
+      firebaseUser.uid,
+      playerProfile.username,
+      playerProfile.avatarId,
+      targetFriend.uid,
+      onlineRoom.code,
+      onlineRoom.levelId,
+    )
+      .then(() => {
+        setLobbyInvitedMap((prev) => ({ ...prev, [targetFriend.uid]: true }));
+        pushSafetyNotice(
+          `Room ${onlineRoom.code} created & invited ${targetFriend.username}!`,
+        );
+      })
+      .catch(() => {});
+  }, [
+    onlineRoom?.code,
+    firebaseUser,
+    playerProfile.username,
+    playerProfile.avatarId,
+    pushSafetyNotice,
+  ]);
+
+  // Record ended match outcome once per matchId into local & cloud profile
+  useEffect(() => {
+    const result = hud.matchResult;
+    if (!result || result.matchId <= 0) return;
+    if (lastRecordedMatchIdRef.current === result.matchId) return;
+    lastRecordedMatchIdRef.current = result.matchId;
+
+    const { nextProfile, earnedStars } = applyMatchOutcomeToProfile(
+      profileRef.current,
+      result,
+    );
+    setLastMatchEarnedStars(earnedStars);
+    applyResolvedProfile(nextProfile);
+
+    const activeUser = auth.currentUser;
+    if (activeUser) {
+      setSyncState('syncing');
+      void saveCloudProfile(
+        activeUser.uid,
+        nextProfile,
+        cloudCreatedAtRef.current,
+      )
+        .then(() => {
+          setSyncState('synced');
+          setSyncError(null);
+        })
+        .catch(() => {
+          const prevDelta = loadPendingSyncDelta();
+          savePendingSyncDelta(
+            appendMatchToSyncDelta(
+              prevDelta,
+              result,
+              earnedStars,
+              nextProfile.unlockedLevel,
+            ),
+          );
+          setSyncState('error');
+          setSyncError('Match saved locally; cloud sync queued.');
+        });
+    } else {
+      const prevDelta = loadPendingSyncDelta();
+      savePendingSyncDelta(
+        appendMatchToSyncDelta(
+          prevDelta,
+          result,
+          earnedStars,
+          nextProfile.unlockedLevel,
+        ),
+      );
+    }
+  }, [hud.matchResult, applyResolvedProfile]);
 
   useEffect(() => {
     const mount = canvasMountRef.current;
@@ -425,7 +973,12 @@ export default function App() {
   }, [customization, hud.unlockedLevel, onlineRoom?.code, onlineRoom?.phase]);
 
   const handleSelectPreset = (preset: CharacterPreset) => {
-    setCustomization(createCustomizationFromPreset(preset));
+    setCustomization((prev) => ({
+      ...createCustomizationFromPreset(preset),
+      name: playerProfile.identityCustomized
+        ? playerProfile.username.slice(0, 16)
+        : preset.defaultName,
+    }));
   };
 
   const handleOutfitStyleChange = (outfitStyle: OutfitStyle) => {
@@ -453,7 +1006,319 @@ export default function App() {
   };
 
   const handleNameChange = (name: string) => {
-    setCustomization((prev) => ({ ...prev, name: name.slice(0, 16) }));
+    setCustomization((prev) => ({
+      ...prev,
+      name: name.slice(0, PROFILE_USERNAME_MAX_LENGTH),
+    }));
+  };
+
+  const handleUpdateProfileIdentity = (username: string, avatarId: string) => {
+    const cleaned = clampUsername(username, profileRef.current.username);
+    const next: PlayerStatsProfile = {
+      ...profileRef.current,
+      username: cleaned,
+      avatarId,
+      identityCustomized: true,
+    };
+    applyResolvedProfile(next);
+
+    const activeUser = auth.currentUser;
+    if (activeUser) {
+      setSyncState('syncing');
+      void saveCloudProfileIdentity(
+        activeUser.uid,
+        cleaned,
+        avatarId,
+        cloudCreatedAtRef.current,
+      )
+        .then(() => {
+          setSyncState('synced');
+          setSyncError(null);
+        })
+        .catch(() => {
+          setSyncState('error');
+          setSyncError('Saved locally; cloud sync will retry later.');
+        });
+    }
+  };
+
+  const handleGoogleSignIn = async () => {
+    setAuthBusy(true);
+    setSyncError(null);
+    try {
+      await signInWithPopup(auth, googleProvider);
+    } catch (err) {
+      const code =
+        typeof err === 'object' && err !== null && 'code' in err
+          ? String((err as { code?: unknown }).code)
+          : '';
+      if (
+        code !== 'auth/popup-closed-by-user' &&
+        code !== 'auth/cancelled-popup-request'
+      ) {
+        setSyncError('Google sign-in could not complete. Please try again.');
+      }
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleGoogleSignOut = async () => {
+    setAuthBusy(true);
+    setSyncError(null);
+    try {
+      if (auth.currentUser) {
+        const p = profileRef.current;
+        await upsertDirectoryPresence(
+          auth.currentUser.uid,
+          p.username,
+          p.avatarId,
+          false,
+          privacySettingsRef.current,
+        ).catch(() => {});
+      }
+      await signOut(auth);
+      pushSafetyNotice('Signed out of your account.');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const handleManualProfileSync = () => {
+    if (!auth.currentUser) return;
+    void syncWithCloudAccount(auth.currentUser);
+  };
+
+  const showPrivacyNotice = useCallback((msg: string) => {
+    setPrivacyNotice(msg);
+    if (privacyNoticeTimerRef.current !== null) {
+      window.clearTimeout(privacyNoticeTimerRef.current);
+    }
+    privacyNoticeTimerRef.current = window.setTimeout(() => {
+      setPrivacyNotice(null);
+      privacyNoticeTimerRef.current = null;
+    }, 3400);
+  }, []);
+
+  const handleUpdatePrivacySettings = async (
+    partial: Partial<PrivacySafetySettings>,
+  ) => {
+    const next: PrivacySafetySettings = {
+      ...privacySettingsRef.current,
+      ...partial,
+    };
+    privacySettingsRef.current = next;
+    setPrivacySettings(next);
+    saveLocalPrivacySettings(next);
+
+    if (auth.currentUser) {
+      try {
+        await saveCloudPrivacySettings(auth.currentUser.uid, next);
+        const p = profileRef.current;
+        await upsertDirectoryPresence(
+          auth.currentUser.uid,
+          p.username,
+          p.avatarId,
+          document.visibilityState !== 'hidden',
+          next,
+        );
+        showPrivacyNotice('Privacy settings updated.');
+      } catch {
+        showPrivacyNotice('Saved locally; cloud sync will retry.');
+      }
+    } else {
+      showPrivacyNotice('Privacy preference saved on this device.');
+    }
+  };
+
+  const handleSubmitPrivacyReport = async (params: {
+    targetUid?: string;
+    targetUsername: string;
+    reason: PlayerReportReason;
+    details: string;
+    alsoBlock?: { uid: string; username: string; avatarId: string };
+  }) => {
+    if (!firebaseUser) return;
+    try {
+      await submitPlayerReport({
+        reporterUid: firebaseUser.uid,
+        reporterUsername: playerProfile.username,
+        targetUid: params.targetUid,
+        targetUsername: params.targetUsername,
+        reason: params.reason,
+        details: params.details,
+        source: 'privacy_settings',
+      });
+      if (params.alsoBlock) {
+        await blockPlayer(firebaseUser.uid, params.alsoBlock);
+      }
+      showPrivacyNotice(
+        params.alsoBlock
+          ? `Report submitted and ${params.targetUsername} blocked.`
+          : `Safety report submitted for ${params.targetUsername}.`,
+      );
+    } catch {
+      showPrivacyNotice('Could not submit report right now.');
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    const user = auth.currentUser;
+    if (!user) return;
+    setAuthBusy(true);
+    try {
+      await deleteUserAccountAndData(user);
+      const freshProfile = createDefaultPlayerProfile();
+      const freshPrivacy = createDefaultPrivacySettings();
+      cloudCreatedAtRef.current = undefined;
+      privacySettingsRef.current = freshPrivacy;
+      setPrivacySettings(freshPrivacy);
+      applyResolvedProfile(freshProfile);
+      setFriends([]);
+      setBlockedUsers([]);
+      setIncomingFriendRequests([]);
+      setOutgoingFriendRequests([]);
+      setIncomingRoomInvites([]);
+      setSubmittedReports([]);
+      setSyncState('offline');
+      setStartScreen('menu');
+      pushSafetyNotice('Your account and cloud data have been permanently deleted.');
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const showFriendsNotice = useCallback((msg: string) => {
+    setFriendsNotice(msg);
+    if (friendsNoticeTimerRef.current !== null) {
+      window.clearTimeout(friendsNoticeTimerRef.current);
+    }
+    friendsNoticeTimerRef.current = window.setTimeout(() => {
+      setFriendsNotice(null);
+      friendsNoticeTimerRef.current = null;
+    }, 3200);
+  }, []);
+
+  const handleSearchPlayers = async (
+    queryText: string,
+  ): Promise<DirectoryPlayer[]> => {
+    if (!firebaseUser) return [];
+    try {
+      return await searchPlayersByUsername(queryText, firebaseUser.uid);
+    } catch {
+      showFriendsNotice('Could not search players right now.');
+      return [];
+    }
+  };
+
+  const handleSendFriendRequest = async (target: DirectoryPlayer) => {
+    if (!firebaseUser) return;
+    try {
+      await sendFriendRequest(
+        firebaseUser.uid,
+        playerProfile.username,
+        playerProfile.avatarId,
+        target,
+      );
+      showFriendsNotice(`Friend request sent to ${target.username}.`);
+    } catch (err) {
+      showFriendsNotice(
+        err instanceof Error ? err.message : 'Could not send friend request.',
+      );
+    }
+  };
+
+  const handleCancelFriendRequest = async (targetUid: string) => {
+    if (!firebaseUser) return;
+    await cancelFriendRequest(firebaseUser.uid, targetUid);
+    showFriendsNotice('Friend request cancelled.');
+  };
+
+  const handleAcceptFriendRequest = async (req: FriendRequestRecord) => {
+    if (!firebaseUser) return;
+    try {
+      await acceptFriendRequest(
+        req,
+        playerProfile.username,
+        playerProfile.avatarId,
+      );
+      showFriendsNotice(`${req.fromUsername} added to your friends!`);
+    } catch {
+      showFriendsNotice('Could not accept friend request.');
+    }
+  };
+
+  const handleDeclineFriendRequest = async (req: FriendRequestRecord) => {
+    await declineFriendRequest(req);
+    showFriendsNotice(`Declined request from ${req.fromUsername}.`);
+  };
+
+  const handleRemoveFriend = async (friendUid: string) => {
+    if (!firebaseUser) return;
+    await removeFriend(firebaseUser.uid, friendUid);
+    showFriendsNotice('Friend removed.');
+  };
+
+  const handleBlockPlayer = async (target: {
+    uid: string;
+    username: string;
+    avatarId: string;
+  }) => {
+    if (!firebaseUser) return;
+    await blockPlayer(firebaseUser.uid, target);
+    showFriendsNotice(`Blocked ${target.username}.`);
+  };
+
+  const handleUnblockPlayer = async (targetUid: string) => {
+    if (!firebaseUser) return;
+    await unblockPlayer(firebaseUser.uid, targetUid);
+    showFriendsNotice('Player unblocked.');
+  };
+
+  const handleInviteFriendToRoom = async (friend: FriendRecord) => {
+    if (!firebaseUser) return;
+    if (!onlineRoom) {
+      pendingInviteFriendRef.current = friend;
+      handleCreateRoom();
+      setStartScreen('online');
+      return;
+    }
+    try {
+      await sendRoomInviteToFriend(
+        firebaseUser.uid,
+        playerProfile.username,
+        playerProfile.avatarId,
+        friend.uid,
+        onlineRoom.code,
+        onlineRoom.levelId,
+      );
+      setLobbyInvitedMap((prev) => ({ ...prev, [friend.uid]: true }));
+      showFriendsNotice(`Invited ${friend.username} to Room ${onlineRoom.code}!`);
+      pushSafetyNotice(`Invited ${friend.username} to Room ${onlineRoom.code}!`);
+    } catch (err) {
+      showFriendsNotice(
+        err instanceof Error ? err.message : 'Could not send invite.',
+      );
+    }
+  };
+
+  const handleAcceptRoomInvite = (invite: RoomInviteRecord) => {
+    engineRef.current?.playUiClick();
+    void respondToRoomInvite(invite.id, 'accepted').catch(() => {});
+    if (onlineRoom && onlineRoom.code !== invite.roomCode) {
+      mpClientRef.current?.leaveRoom();
+    }
+    setRoomError(null);
+    setJoinCodeInput(invite.roomCode);
+    if (hud.phase !== 'start') {
+      engineRef.current?.returnToStart();
+    }
+    setStartScreen('online');
+    mpClientRef.current?.joinRoom(invite.roomCode, customization);
+  };
+
+  const handleDismissRoomInvite = (invite: RoomInviteRecord) => {
+    void respondToRoomInvite(invite.id, 'dismissed').catch(() => {});
   };
 
   const handleSelectLevel = (levelId: number) => {
@@ -494,7 +1359,54 @@ export default function App() {
     setShowScoreboard(false);
     setShowCameraSettings(false);
     setShowAudioSettings(false);
+    setStartScreen('menu');
     engineRef.current?.returnToStart();
+  };
+
+  const handleOpenStartSection = (
+    section:
+      | 'menu'
+      | 'levels'
+      | 'character'
+      | 'online'
+      | 'settings'
+      | 'profile'
+      | 'friends'
+      | 'privacy',
+  ) => {
+    engineRef.current?.playUiClick();
+    if (section === 'privacy') {
+      setPrivacyReturnScreen(
+        startScreen === 'settings' || startScreen === 'friends'
+          ? startScreen
+          : 'menu',
+      );
+    }
+    setStartScreen(section);
+  };
+
+  const handleQuitGame = () => {
+    engineRef.current?.playUiClick();
+    const winAny = window as unknown as {
+      Capacitor?: { Plugins?: { App?: { exitApp?: () => void } } };
+    };
+    const navAny = navigator as unknown as {
+      app?: { exitApp?: () => void };
+    };
+    if (winAny.Capacitor?.Plugins?.App?.exitApp) {
+      winAny.Capacitor.Plugins.App.exitApp();
+      return;
+    }
+    if (navAny.app?.exitApp) {
+      navAny.app.exitApp();
+      return;
+    }
+    try {
+      window.close();
+    } catch {
+      // Browser tab close prevented when not script-opened
+    }
+    setShowQuitModal(true);
   };
 
   const handleToggleHide = () => {
@@ -657,6 +1569,16 @@ export default function App() {
       reportReason,
       reportDetails,
     );
+    if (firebaseUser) {
+      void submitPlayerReport({
+        reporterUid: firebaseUser.uid,
+        reporterUsername: playerProfile.username,
+        targetUsername: reportTarget.name,
+        reason: reportReason,
+        details: reportDetails,
+        source: 'multiplayer_room',
+      }).catch(() => {});
+    }
   };
 
   const selectedPreset = getPresetById(customization.presetId);
@@ -667,6 +1589,9 @@ export default function App() {
     hud.currentLevelId < TOTAL_LEVELS
       ? getLevelConfig(hud.currentLevelId + 1)
       : null;
+
+  const visibleIncomingRoomInvites =
+    privacySettings.roomInvitePolicy === 'nobody' ? [] : incomingRoomInvites;
 
   const isInOnlineRoom = onlineRoom !== null && localOnlinePlayerId !== null;
   const isOnlineHost =
@@ -1765,126 +2690,363 @@ export default function App() {
         </>
       )}
 
-      {/* Start Screen: Compact Single-Screen Mobile Layout + Split Desktop Showcase */}
+      {/* Start Phase: Beautiful 9:16 Portrait 3D Main Menu + Connected Game Screens */}
       {hud.phase === 'start' && !hud.webglError && (
-        <div className="pointer-events-none absolute inset-0 z-20 flex flex-col lg:flex-row justify-between gap-2 lg:gap-4 p-2.5 sm:p-5 lg:p-6 overflow-hidden">
-          {/* Top / Left Hero Header */}
-          <div className="flex flex-col justify-between lg:max-w-[44%] shrink-0">
-            <div className="min-w-0">
-              <p className="hidden sm:block text-xs font-semibold tracking-wider text-amber-200 drop-shadow">
-                1995 Indian Village Hide-and-Seek
-              </p>
-              <h1 className="font-display text-base sm:text-2xl lg:text-4xl font-bold tracking-tight text-amber-50 leading-tight whitespace-nowrap truncate drop-shadow-[0_2px_10px_rgba(20,12,6,0.75)]">
-                Gully Chhupan Chhupai 1995
-              </h1>
-              <p className="mt-0.5 sm:mt-1 text-[11px] sm:text-sm font-medium text-amber-100/90 truncate drop-shadow">
-                Level {activeLevel.id} · {activeLevel.name} ({activeLevel.difficultyLabel})
-              </p>
-            </div>
+        <div className="pointer-events-none absolute inset-0 z-20 flex flex-col items-center justify-center overflow-hidden">
+          <div className="relative flex h-full w-full max-w-[430px] flex-col justify-between px-3 pt-3 pb-3 sm:px-4 sm:pt-4 sm:pb-4">
+            {/* MAIN MENU SCREEN */}
+            {startScreen === 'menu' ? (
+              <>
+                {/* Top Profile Shortcut + Audio Toggle + Title Lockup */}
+                <header className="pointer-events-auto flex flex-col items-center shrink-0">
+                  <div className="flex w-full items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleOpenStartSection('profile')}
+                      aria-label="Open player profile and statistics"
+                      className="inline-flex items-center gap-2 min-w-0 min-h-[38px] rounded-xl border border-amber-200/25 bg-[#1b120c]/85 hover:bg-[#2a1c13] px-2 py-1 pr-2.5 text-left transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                    >
+                      <ProfileAvatar
+                        avatarId={playerProfile.avatarId}
+                        sizeClass="w-7 h-7"
+                      />
+                      <div className="min-w-0 leading-tight">
+                        <div className="flex items-center gap-1">
+                          <span className="text-[11px] font-bold text-amber-50 truncate max-w-[110px]">
+                            {playerProfile.username}
+                          </span>
+                          {firebaseUser && (
+                            <Cloud
+                              className="w-3 h-3 text-emerald-300 shrink-0"
+                              aria-hidden="true"
+                            />
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[9.5px] font-mono tabular-nums text-amber-300/95">
+                          <span>{playerProfile.matchesWon}W</span>
+                          <span className="inline-flex items-center gap-0.5">
+                            <Star
+                              className="w-2.5 h-2.5 fill-amber-300 text-amber-300"
+                              aria-hidden="true"
+                            />
+                            {getTotalEarnedStars(playerProfile)}
+                          </span>
+                          <span className="text-amber-100/70 font-sans">
+                            · Stats
+                          </span>
+                        </div>
+                      </div>
+                    </button>
 
-            {/* Subtle character & level nameplate under the 3D showcase */}
-            <div className="hidden lg:inline-flex flex-col self-start rounded-xl bg-[#1d140e]/82 border border-amber-200/20 px-4 py-2.5">
-              <div className="flex items-baseline gap-2">
-                <span className="font-display text-lg font-bold text-amber-50">
-                  {displayChosenName}
-                </span>
-                <span className="text-xs text-amber-300/90">
-                  {selectedPreset.ageLabel} ·{' '}
-                  {selectedPreset.ageGroup === 'child' ? 'Village Kid' : 'Village Teen'}
-                </span>
-              </div>
-              <span className="text-xs text-amber-100/75">
-                {chosenRole === 'seeker'
-                  ? 'Wearing Seeker saffron bandana'
-                  : selectedPreset.tagline}
-              </span>
-            </div>
-          </div>
+                    <button
+                      type="button"
+                      onClick={handleToggleMute}
+                      title={hud.audioSettings.muted ? 'Unmute audio' : 'Mute audio'}
+                      aria-label={hud.audioSettings.muted ? 'Unmute audio' : 'Mute audio'}
+                      aria-pressed={hud.audioSettings.muted}
+                      className={`inline-flex items-center justify-center gap-1 min-w-[36px] min-h-[38px] rounded-xl border px-2 py-1 text-[11px] font-semibold transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 shrink-0 ${
+                        hud.audioSettings.muted
+                          ? 'bg-amber-500/25 text-amber-200 border-amber-300'
+                          : 'bg-[#1b120c]/82 hover:bg-[#2a1c13] text-amber-50 border-amber-200/25'
+                      }`}
+                    >
+                      {hud.audioSettings.muted ? (
+                        <VolumeX className="w-4 h-4 shrink-0" aria-hidden="true" />
+                      ) : (
+                        <Volume2 className="w-4 h-4 shrink-0 text-amber-300" aria-hidden="true" />
+                      )}
+                      <span className="text-[10px] whitespace-nowrap">
+                        {hud.audioSettings.muted ? 'Muted' : 'Music'}
+                      </span>
+                    </button>
+                  </div>
 
-          {/* Right Level Selection, Character Customization, Audio & Online Panel */}
-          <div className="pointer-events-auto flex flex-col flex-1 min-h-0 lg:flex-none w-full lg:w-[446px] lg:max-h-[calc(100dvh-2.5rem)] overflow-hidden rounded-xl sm:rounded-2xl border border-amber-200/25 bg-[#1e140e]/92 px-3 py-2.5 sm:px-5 sm:py-4 shadow-2xl">
-            {/* Top Bar: Levels / Character / Online Switcher + Compact Mute Button */}
-            <div className="flex items-center justify-between gap-1.5 pb-2 sm:pb-3 border-b border-amber-100/12 shrink-0">
-              <div className="flex items-center gap-1 flex-1 min-w-0">
-                <button
-                  type="button"
-                  onClick={() => setStartTab('levels')}
-                  aria-pressed={startTab === 'levels'}
-                  className={`flex-1 min-w-0 inline-flex items-center justify-center gap-1 min-h-[36px] sm:min-h-[40px] rounded-lg border px-1.5 sm:px-2 py-1 text-[10.5px] sm:text-xs font-bold whitespace-nowrap overflow-hidden transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
-                    startTab === 'levels'
-                      ? 'bg-amber-500 text-[#1d140e] border-amber-200'
-                      : 'bg-[#150e0a]/80 text-amber-100/80 border-amber-100/15 hover:border-amber-200/35'
-                  }`}
+                  <h1 className="font-display mt-1.5 text-center text-[21px] sm:text-[25px] font-bold tracking-wide text-amber-50 leading-tight text-balance drop-shadow-[0_3px_12px_rgba(16,9,4,0.95)]">
+                    GULLY CHHUPAN CHHUPAI 1995
+                  </h1>
+
+                  <p className="mt-1 text-center text-[11px] sm:text-xs font-medium text-amber-100/95 truncate max-w-full drop-shadow-[0_2px_8px_rgba(16,9,4,0.95)]">
+                    Level {activeLevel.id} · {activeLevel.name} · {displayChosenName}
+                  </p>
+                </header>
+
+                {/* Open Center Stage for 3D Village & Animated Village Characters */}
+                <div className="flex-1 min-h-0" aria-hidden="true" />
+
+                {/* Bottom 9:16 Vertical Menu Dock */}
+                <nav
+                  aria-label="Main Menu"
+                  className="pointer-events-auto w-full shrink-0 rounded-2xl border border-amber-200/25 bg-[#1b120c]/88 p-2.5 sm:p-3 shadow-2xl"
                 >
-                  <MapPin className="w-3 h-3 sm:w-3.5 sm:h-3.5 shrink-0" aria-hidden="true" />
-                  <span className="truncate">
-                    Levels ({hud.unlockedLevel}/{TOTAL_LEVELS})
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setStartTab('character')}
-                  aria-pressed={startTab === 'character'}
-                  className={`flex-1 min-w-0 inline-flex items-center justify-center gap-1 min-h-[36px] sm:min-h-[40px] rounded-lg border px-1.5 sm:px-2 py-1 text-[10.5px] sm:text-xs font-bold whitespace-nowrap overflow-hidden transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
-                    startTab === 'character'
-                      ? 'bg-amber-500 text-[#1d140e] border-amber-200'
-                      : 'bg-[#150e0a]/80 text-amber-100/80 border-amber-100/15 hover:border-amber-200/35'
-                  }`}
-                >
-                  <User className="w-3 h-3 sm:w-3.5 sm:h-3.5 shrink-0" aria-hidden="true" />
-                  <span className="truncate">Character</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setStartTab('online')}
-                  aria-pressed={startTab === 'online'}
-                  className={`flex-1 min-w-0 inline-flex items-center justify-center gap-1 min-h-[36px] sm:min-h-[40px] rounded-lg border px-1.5 sm:px-2 py-1 text-[10.5px] sm:text-xs font-bold whitespace-nowrap overflow-hidden transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
-                    startTab === 'online'
-                      ? 'bg-amber-500 text-[#1d140e] border-amber-200'
-                      : isInOnlineRoom
-                        ? 'bg-emerald-950/75 text-emerald-200 border-emerald-400/45 hover:border-emerald-300'
-                        : 'bg-[#150e0a]/80 text-amber-100/80 border-amber-100/15 hover:border-amber-200/35'
-                  }`}
-                >
-                  <Users className="w-3 h-3 sm:w-3.5 sm:h-3.5 shrink-0" aria-hidden="true" />
-                  <span className="truncate">
-                    {isInOnlineRoom
-                      ? `Room (${onlineRoom.players.length}/${MAX_ROOM_PLAYERS})`
-                      : 'Online'}
-                  </span>
-                </button>
-              </div>
+                  {/* Solo Role Selector */}
+                  <div className="grid grid-cols-2 gap-1.5 mb-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        engineRef.current?.playUiClick();
+                        setChosenRole('hider');
+                      }}
+                      aria-pressed={chosenRole === 'hider'}
+                      className={`flex items-center justify-center gap-1.5 min-h-[34px] rounded-xl border px-2 py-1 text-[11px] sm:text-xs font-bold whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                        chosenRole === 'hider'
+                          ? 'bg-amber-500/22 border-amber-300 text-amber-50'
+                          : 'bg-[#130c08]/85 border-amber-100/15 text-amber-100/75 hover:border-amber-200/35'
+                      }`}
+                    >
+                      <EyeOff className="w-3.5 h-3.5 text-amber-300 shrink-0" aria-hidden="true" />
+                      <span>Play as Hider</span>
+                    </button>
 
-              <button
-                type="button"
-                onClick={handleToggleMute}
-                title={hud.audioSettings.muted ? 'Unmute audio' : 'Mute audio'}
-                aria-label={hud.audioSettings.muted ? 'Unmute audio' : 'Mute audio'}
-                className={`inline-flex items-center justify-center min-w-[36px] min-h-[36px] sm:min-w-[40px] sm:min-h-[40px] rounded-lg border shrink-0 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
-                  hud.audioSettings.muted
-                    ? 'bg-amber-500/25 text-amber-200 border-amber-300'
-                    : 'bg-[#150e0a]/80 text-amber-100/85 border-amber-100/15 hover:border-amber-200/35'
-                }`}
-              >
-                {hud.audioSettings.muted ? (
-                  <VolumeX className="w-3.5 h-3.5 sm:w-4 sm:h-4" aria-hidden="true" />
-                ) : (
-                  <Volume2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" aria-hidden="true" />
-                )}
-              </button>
-            </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        engineRef.current?.playUiClick();
+                        setChosenRole('seeker');
+                      }}
+                      aria-pressed={chosenRole === 'seeker'}
+                      className={`flex items-center justify-center gap-1.5 min-h-[34px] rounded-xl border px-2 py-1 text-[11px] sm:text-xs font-bold whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                        chosenRole === 'seeker'
+                          ? 'bg-[#d96b27]/28 border-amber-300 text-amber-50'
+                          : 'bg-[#130c08]/85 border-amber-100/15 text-amber-100/75 hover:border-amber-200/35'
+                      }`}
+                    >
+                      <Search className="w-3.5 h-3.5 text-amber-300 shrink-0" aria-hidden="true" />
+                      <span>Play as Seeker</span>
+                    </button>
+                  </div>
 
-            {/* Scroll-safe Middle Tab Body (compact so all tabs fit inside 1 single screen) */}
-            <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-0.5">
-              {/* TAB 1: 8-Level Map Selection Screen */}
-              {startTab === 'levels' && (
-                <div className="mt-2 sm:mt-3">
+                  {/* Large Primary PLAY Button */}
+                  <button
+                    type="button"
+                    onClick={handleStartMatch}
+                    className="w-full inline-flex items-center justify-center gap-2 min-h-[48px] sm:min-h-[52px] rounded-xl bg-[#d96b27] hover:bg-[#e87933] active:scale-[0.985] border border-amber-200/45 px-4 py-2.5 text-base sm:text-lg font-bold tracking-wide text-white shadow-lg transition-all whitespace-nowrap cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-200"
+                  >
+                    <Play className="w-5 h-5 fill-current shrink-0" aria-hidden="true" />
+                    <span>PLAY</span>
+                    <span className="text-xs font-semibold text-amber-100/90 truncate">
+                      · {activeLevel.shortName}
+                    </span>
+                  </button>
+
+                  {/* 2x2 Menu Navigation Grid: MULTIPLAYER, LEVELS, CHARACTER, FRIENDS */}
+                  <div className="mt-2 grid grid-cols-2 gap-1.5 sm:gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleOpenStartSection('online')}
+                      className={`inline-flex items-center justify-center gap-1.5 min-h-[40px] sm:min-h-[44px] rounded-xl border px-2.5 py-2 text-xs sm:text-sm font-bold whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                        isInOnlineRoom
+                          ? 'bg-emerald-950/80 border-emerald-400/50 text-emerald-200 hover:border-emerald-300'
+                          : 'bg-[#261911]/92 hover:bg-[#322117] border-amber-100/20 text-amber-50'
+                      }`}
+                    >
+                      <Users className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
+                      <span className="truncate">
+                        {isInOnlineRoom
+                          ? `ROOM (${onlineRoom.players.length}/${MAX_ROOM_PLAYERS})`
+                          : 'MULTIPLAYER'}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleOpenStartSection('levels')}
+                      className="inline-flex items-center justify-center gap-1.5 min-h-[40px] sm:min-h-[44px] rounded-xl border border-amber-100/20 bg-[#261911]/92 hover:bg-[#322117] px-2.5 py-2 text-xs sm:text-sm font-bold text-amber-50 whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                    >
+                      <MapPin className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
+                      <span className="truncate">
+                        LEVELS ({hud.unlockedLevel}/{TOTAL_LEVELS})
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleOpenStartSection('character')}
+                      className="inline-flex items-center justify-center gap-1.5 min-h-[40px] sm:min-h-[44px] rounded-xl border border-amber-100/20 bg-[#261911]/92 hover:bg-[#322117] px-2.5 py-2 text-xs sm:text-sm font-bold text-amber-50 whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                    >
+                      <User className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
+                      <span>CHARACTER</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleOpenStartSection('friends')}
+                      className="relative inline-flex items-center justify-center gap-1.5 min-h-[40px] sm:min-h-[44px] rounded-xl border border-amber-100/20 bg-[#261911]/92 hover:bg-[#322117] px-2.5 py-2 text-xs sm:text-sm font-bold text-amber-50 whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                    >
+                      <UserPlus className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
+                      <span>FRIENDS</span>
+                      {incomingFriendRequests.length + visibleIncomingRoomInvites.length > 0 && (
+                        <span className="inline-flex items-center justify-center min-w-[18px] h-[18px] rounded-full bg-rose-600 px-1 font-mono text-[10px] font-bold text-white">
+                          {incomingFriendRequests.length + visibleIncomingRoomInvites.length}
+                        </span>
+                      )}
+                    </button>
+                  </div>
+
+                  {/* PROFILE & STATS + SETTINGS Row */}
+                  <div className="mt-1.5 sm:mt-2 grid grid-cols-2 gap-1.5 sm:gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleOpenStartSection('profile')}
+                      className="inline-flex items-center justify-center gap-1.5 min-h-[38px] sm:min-h-[42px] rounded-xl border border-amber-200/20 bg-[#1e140e]/92 hover:bg-[#2c1d14] px-2.5 py-1.5 text-xs sm:text-sm font-bold text-amber-100 whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                    >
+                      <BarChart3 className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
+                      <span>PROFILE &amp; STATS</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleOpenStartSection('settings')}
+                      className="inline-flex items-center justify-center gap-1.5 min-h-[38px] sm:min-h-[42px] rounded-xl border border-amber-200/20 bg-[#1e140e]/92 hover:bg-[#2c1d14] px-2.5 py-1.5 text-xs sm:text-sm font-bold text-amber-100 whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                    >
+                      <SlidersHorizontal className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
+                      <span>SETTINGS</span>
+                    </button>
+                  </div>
+
+                  {/* QUIT Button */}
+                  <button
+                    type="button"
+                    onClick={handleQuitGame}
+                    className="mt-1.5 w-full inline-flex items-center justify-center gap-1.5 min-h-[34px] sm:min-h-[38px] rounded-xl border border-amber-100/15 bg-[#130c08]/88 hover:bg-[#2c1712] px-3 py-1 text-xs sm:text-sm font-semibold text-amber-100/85 whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                  >
+                    <Power className="w-3.5 h-3.5 shrink-0 text-amber-200/80" aria-hidden="true" />
+                    <span>QUIT</span>
+                  </button>
+                </nav>
+              </>
+            ) : (
+              /* SUB-SCREENS CONNECTED FROM MAIN MENU (Levels, Character, Multiplayer, Settings, Profile, Friends) */
+              <div className="pointer-events-auto flex flex-col flex-1 min-h-0 overflow-hidden rounded-2xl border border-amber-200/25 bg-[#1e140e]/92 px-3 py-2.5 sm:px-4 sm:py-3.5 shadow-2xl">
+                {/* Sub-Screen Header with Back & Sound Toggle */}
+                <div className="flex items-center justify-between gap-2 pb-2 sm:pb-2.5 border-b border-amber-100/12 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      handleOpenStartSection(
+                        startScreen === 'privacy' ? privacyReturnScreen : 'menu',
+                      )
+                    }
+                    className="inline-flex items-center gap-1 min-h-[36px] rounded-lg border border-amber-100/20 bg-[#150e0a]/90 hover:bg-[#2a1c14] px-2.5 py-1 text-xs font-bold text-amber-100 whitespace-nowrap shrink-0 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                  >
+                    <ArrowLeft className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    <span>
+                      {startScreen === 'privacy' && privacyReturnScreen === 'settings'
+                        ? 'Settings'
+                        : startScreen === 'privacy' && privacyReturnScreen === 'friends'
+                          ? 'Friends'
+                          : 'Menu'}
+                    </span>
+                  </button>
+
+                  <h2 className="font-display text-sm sm:text-base font-bold text-amber-50 truncate">
+                    {startScreen === 'levels' && `Levels (${hud.unlockedLevel}/${TOTAL_LEVELS})`}
+                    {startScreen === 'character' && 'Character'}
+                    {startScreen === 'online' &&
+                      (isInOnlineRoom
+                        ? `Room ${onlineRoom.code}`
+                        : 'Multiplayer')}
+                    {startScreen === 'settings' && 'Settings'}
+                    {startScreen === 'profile' && 'Profile & Stats'}
+                    {startScreen === 'friends' && 'Friends'}
+                    {startScreen === 'privacy' && 'Privacy & Safety'}
+                  </h2>
+
+                  <button
+                    type="button"
+                    onClick={handleToggleMute}
+                    title={hud.audioSettings.muted ? 'Unmute audio' : 'Mute audio'}
+                    aria-label={hud.audioSettings.muted ? 'Unmute audio' : 'Mute audio'}
+                    className={`inline-flex items-center justify-center min-w-[36px] min-h-[36px] rounded-lg border shrink-0 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                      hud.audioSettings.muted
+                        ? 'bg-amber-500/25 text-amber-200 border-amber-300'
+                        : 'bg-[#150e0a]/80 text-amber-100/85 border-amber-100/15 hover:border-amber-200/35'
+                    }`}
+                  >
+                    {hud.audioSettings.muted ? (
+                      <VolumeX className="w-4 h-4" aria-hidden="true" />
+                    ) : (
+                      <Volume2 className="w-4 h-4" aria-hidden="true" />
+                    )}
+                  </button>
+                </div>
+
+                {/* Scroll-safe Body */}
+                <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-0.5">
+                  {/* SUB-SCREEN 0: Player Profile, Statistics & Cloud Sync */}
+                  {startScreen === 'profile' && (
+                    <PlayerProfilePanel
+                      profile={playerProfile}
+                      firebaseUser={firebaseUser}
+                      syncState={syncState}
+                      syncError={syncError}
+                      authBusy={authBusy}
+                      onUpdateIdentity={handleUpdateProfileIdentity}
+                      onSignInGoogle={handleGoogleSignIn}
+                      onSignOutGoogle={handleGoogleSignOut}
+                      onManualSync={handleManualProfileSync}
+                    />
+                  )}
+
+                  {/* SUB-SCREEN 0B: Friends, Search, Requests & Room Invites */}
+                  {startScreen === 'friends' && (
+                    <FriendsPanel
+                      firebaseUser={firebaseUser}
+                      authBusy={authBusy}
+                      friends={friends}
+                      blockedUsers={blockedUsers}
+                      incomingRequests={incomingFriendRequests}
+                      outgoingRequests={outgoingFriendRequests}
+                      incomingInvites={visibleIncomingRoomInvites}
+                      activeRoomCode={onlineRoom?.code ?? null}
+                      friendsNotice={friendsNotice}
+                      onSignInGoogle={handleGoogleSignIn}
+                      onSearchPlayers={handleSearchPlayers}
+                      onSendRequest={handleSendFriendRequest}
+                      onCancelRequest={handleCancelFriendRequest}
+                      onAcceptRequest={handleAcceptFriendRequest}
+                      onDeclineRequest={handleDeclineFriendRequest}
+                      onRemoveFriend={handleRemoveFriend}
+                      onBlockPlayer={handleBlockPlayer}
+                      onUnblockPlayer={handleUnblockPlayer}
+                      onInviteFriend={handleInviteFriendToRoom}
+                      onAcceptRoomInvite={handleAcceptRoomInvite}
+                      onDismissRoomInvite={handleDismissRoomInvite}
+                    />
+                  )}
+
+                  {/* SUB-SCREEN 0C: Player Privacy & Safety Settings */}
+                  {startScreen === 'privacy' && (
+                    <PrivacySafetyPanel
+                      firebaseUser={firebaseUser}
+                      authBusy={authBusy}
+                      privacySettings={privacySettings}
+                      privacyNotice={privacyNotice}
+                      friends={friends}
+                      blockedUsers={blockedUsers}
+                      submittedReports={submittedReports}
+                      roomPlayers={(onlineRoom?.players ?? [])
+                        .filter((p) => p.id !== localOnlinePlayerId)
+                        .map((p) => ({ id: p.id, name: p.name }))}
+                      onSignInGoogle={handleGoogleSignIn}
+                      onSignOutGoogle={handleGoogleSignOut}
+                      onDeleteAccount={handleDeleteAccount}
+                      onUpdatePrivacySettings={handleUpdatePrivacySettings}
+                      onSearchPlayers={handleSearchPlayers}
+                      onBlockPlayer={handleBlockPlayer}
+                      onUnblockPlayer={handleUnblockPlayer}
+                      onSubmitReport={handleSubmitPrivacyReport}
+                    />
+                  )}
+
+                  {/* SUB-SCREEN 1: 8-Level Map Selection Screen */}
+                  {startScreen === 'levels' && (
+                    <div className="mt-2 sm:mt-3">
                   <div className="flex items-baseline justify-between gap-2 mb-1.5 sm:mb-2">
                     <span className="text-[11px] sm:text-xs font-semibold text-amber-200/90 whitespace-nowrap">
                       Select Playable Map
                     </span>
                     <span className="text-[9.5px] sm:text-[11px] text-amber-100/65 truncate">
-                      Win a level to unlock next
+                      ★ {getTotalEarnedStars(playerProfile)}/{TOTAL_LEVELS * 3} Earned
                     </span>
                   </div>
 
@@ -1892,6 +3054,8 @@ export default function App() {
                     {LEVEL_CONFIGS.map((lvl) => {
                       const isUnlocked = lvl.id <= hud.unlockedLevel;
                       const isSelected = lvl.id === hud.currentLevelId;
+                      const lvlStars =
+                        playerProfile.levelStars[String(lvl.id)] ?? 0;
                       return (
                         <button
                           key={lvl.id}
@@ -1912,8 +3076,18 @@ export default function App() {
                               L{lvl.id}
                             </span>
                             {isUnlocked ? (
-                              <span className="text-[9px] sm:text-[10px] font-semibold text-amber-100/75 truncate">
-                                {lvl.difficultyLabel}
+                              <span className="inline-flex items-center gap-0.5">
+                                {[1, 2, 3].map((idx) => (
+                                  <Star
+                                    key={idx}
+                                    className={`w-2.5 h-2.5 sm:w-3 sm:h-3 ${
+                                      idx <= lvlStars
+                                        ? 'fill-amber-400 text-amber-400'
+                                        : 'text-amber-100/20'
+                                    }`}
+                                    aria-hidden="true"
+                                  />
+                                ))}
                               </span>
                             ) : (
                               <span className="inline-flex items-center gap-0.5 text-[9px] sm:text-[10px] font-semibold text-amber-100/50 whitespace-nowrap">
@@ -2023,9 +3197,9 @@ export default function App() {
                 </div>
               )}
 
-              {/* TAB 2: Character Selection & Customization */}
-              {startTab === 'character' && (
-                <div className="mt-2 sm:mt-3">
+                  {/* SUB-SCREEN 2: Character Selection & Customization */}
+                  {startScreen === 'character' && (
+                    <div className="mt-2 sm:mt-3">
                   {/* 1. Character Name Input */}
                   <div className="flex items-center justify-between gap-2">
                     <label
@@ -2188,8 +3362,8 @@ export default function App() {
                 </div>
               )}
 
-              {/* TAB 3: Real-Time Online Multiplayer Rooms (Up to 10 Real Players) */}
-              {startTab === 'online' && (
+              {/* SUB-SCREEN 3: Real-Time Online Multiplayer Rooms (Up to 10 Real Players) */}
+              {startScreen === 'online' && (
                 <div className="mt-2 sm:mt-3 space-y-2 sm:space-y-3">
                   {roomError && (
                     <div className="rounded-lg border border-rose-400/40 bg-rose-950/75 px-2.5 py-1.5 text-[11px] font-medium text-rose-100">
@@ -2310,6 +3484,63 @@ export default function App() {
                           </div>
                         )}
                       </div>
+
+                      {/* Quick Invite Friends Strip inside Waiting Lobby */}
+                      {firebaseUser && (
+                        <div className="rounded-xl border border-amber-100/15 bg-[#150e0a]/85 p-2 sm:p-2.5">
+                          <div className="flex items-center justify-between gap-2 mb-1.5">
+                            <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-200">
+                              <UserPlus className="w-3 h-3" aria-hidden="true" />
+                              <span>Invite Friends</span>
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => handleOpenStartSection('friends')}
+                              className="text-[10px] font-semibold text-amber-300 hover:text-amber-200 cursor-pointer"
+                            >
+                              Manage Friends
+                            </button>
+                          </div>
+
+                          {friends.length === 0 ? (
+                            <p className="text-[10px] text-amber-100/60">
+                              Add friends from the Friends screen to invite them with one tap.
+                            </p>
+                          ) : (
+                            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+                              {friends.map((friend) => {
+                                const sent = Boolean(lobbyInvitedMap[friend.uid]);
+                                return (
+                                  <button
+                                    key={friend.uid}
+                                    type="button"
+                                    onClick={() => handleInviteFriendToRoom(friend)}
+                                    className={`inline-flex items-center gap-1.5 shrink-0 rounded-lg border px-2 py-1 text-[10.5px] font-semibold transition-colors cursor-pointer ${
+                                      sent
+                                        ? 'border-emerald-400/40 bg-emerald-950/55 text-emerald-200'
+                                        : 'border-amber-100/15 bg-[#1e140e] hover:border-amber-300/45 text-amber-50'
+                                    }`}
+                                  >
+                                    <span
+                                      className={`w-2 h-2 rounded-full shrink-0 ${
+                                        friend.isOnline
+                                          ? 'bg-emerald-400'
+                                          : 'bg-stone-500'
+                                      }`}
+                                    />
+                                    <span className="max-w-[78px] truncate">
+                                      {friend.username}
+                                    </span>
+                                    <span className="text-[9.5px] font-bold text-amber-300">
+                                      {sent ? 'Sent' : 'Invite'}
+                                    </span>
+                                  </button>
+                                );
+                              })}
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {/* Waiting Lobby Joined Players Roster */}
                       <div className="rounded-xl border border-amber-100/15 bg-[#150e0a]/85 p-2 sm:p-2.5">
@@ -2708,70 +3939,350 @@ export default function App() {
                   )}
                 </div>
               )}
-            </div>
 
-            {/* Pinned Solo Team Selection + Play Button (hidden while on Online tab or inside an Online Room) */}
-            {startTab !== 'online' && !isInOnlineRoom && (
-              <div className="mt-2 sm:mt-3 border-t border-amber-100/12 pt-2 sm:pt-3 shrink-0">
-                <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setChosenRole('hider')}
-                    aria-pressed={chosenRole === 'hider'}
-                    className={`flex items-center gap-1.5 sm:gap-2 min-w-0 rounded-lg sm:rounded-xl border px-2.5 py-1.5 sm:px-3 sm:py-2 text-left transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
-                      chosenRole === 'hider'
-                        ? 'bg-amber-500/20 border-amber-300 text-amber-50'
-                        : 'bg-[#150e0a]/80 border-amber-100/15 text-amber-100/75 hover:border-amber-200/35'
-                    }`}
-                  >
-                    <EyeOff className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-300 shrink-0" aria-hidden="true" />
-                    <div className="min-w-0">
-                      <div className="text-[11px] sm:text-xs font-bold leading-tight">Hider</div>
-                      <div className="text-[9.5px] sm:text-[10px] text-amber-100/70 truncate">12s hide · 3m</div>
-                    </div>
-                  </button>
+                  {/* SUB-SCREEN 4: Settings (Privacy & Safety, Sound, Graphics, Controls) */}
+                  {startScreen === 'settings' && (
+                    <div className="mt-2.5 space-y-3 text-xs">
+                      {/* Privacy & Safety Entry Card */}
+                      <button
+                        type="button"
+                        onClick={() => handleOpenStartSection('privacy')}
+                        className="w-full flex items-center justify-between gap-2 rounded-xl border border-amber-300/30 bg-[#18100b] hover:bg-[#241710] px-3 py-2.5 text-left transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span className="inline-flex items-center justify-center w-8 h-8 rounded-lg bg-amber-500/20 border border-amber-300/30 shrink-0">
+                            <ShieldCheck className="w-4 h-4 text-amber-300" aria-hidden="true" />
+                          </span>
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-amber-50 truncate">
+                              Privacy &amp; Safety Settings
+                            </div>
+                            <div className="text-[10px] text-amber-100/70 truncate">
+                              Requests, online status, invites, blocks, report &amp; account
+                            </div>
+                          </div>
+                        </div>
+                        <ChevronRight className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
+                      </button>
 
-                  <button
-                    type="button"
-                    onClick={() => setChosenRole('seeker')}
-                    aria-pressed={chosenRole === 'seeker'}
-                    className={`flex items-center gap-1.5 sm:gap-2 min-w-0 rounded-lg sm:rounded-xl border px-2.5 py-1.5 sm:px-3 sm:py-2 text-left transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
-                      chosenRole === 'seeker'
-                        ? 'bg-[#d96b27]/25 border-amber-300 text-amber-50'
-                        : 'bg-[#150e0a]/80 border-amber-100/15 text-amber-100/75 hover:border-amber-200/35'
-                    }`}
-                  >
-                    <Search className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-300 shrink-0" aria-hidden="true" />
-                    <div className="min-w-0">
-                      <div className="text-[11px] sm:text-xs font-bold leading-tight">Seeker</div>
-                      <div className="text-[9.5px] sm:text-[10px] text-amber-100/70 truncate">Count 12s · Tag 4</div>
+                      {/* Sound Section */}
+                      <div className="rounded-xl border border-amber-100/15 bg-[#150e0a]/85 p-3 space-y-2.5">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-amber-200">
+                            Sound &amp; 1995 Village Music
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleToggleMute}
+                            className={`rounded-md border px-2 py-0.5 text-[11px] font-semibold cursor-pointer transition-colors ${
+                              hud.audioSettings.muted
+                                ? 'bg-amber-500 text-[#1d140e] border-amber-200'
+                                : 'bg-[#1e140e] text-amber-100/80 border-amber-100/20'
+                            }`}
+                          >
+                            {hud.audioSettings.muted ? 'Muted' : 'Sound On'}
+                          </button>
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between text-amber-100/85">
+                            <label htmlFor="menu-music-vol">Background Music</label>
+                            <span className="font-mono tabular-nums text-amber-300">
+                              {Math.round(hud.audioSettings.musicVolume * 100)}%
+                            </span>
+                          </div>
+                          <input
+                            id="menu-music-vol"
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={hud.audioSettings.musicVolume}
+                            onChange={(e) =>
+                              handleAudioSettingChange({
+                                musicVolume: parseFloat(e.target.value),
+                                muted: false,
+                              })
+                            }
+                            className="mt-1 w-full accent-amber-400 cursor-pointer"
+                          />
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between text-amber-100/85">
+                            <label htmlFor="menu-sfx-vol">Sound Effects &amp; Village</label>
+                            <span className="font-mono tabular-nums text-amber-300">
+                              {Math.round(hud.audioSettings.sfxVolume * 100)}%
+                            </span>
+                          </div>
+                          <input
+                            id="menu-sfx-vol"
+                            type="range"
+                            min={0}
+                            max={1}
+                            step={0.05}
+                            value={hud.audioSettings.sfxVolume}
+                            onChange={(e) =>
+                              handleAudioSettingChange({
+                                sfxVolume: parseFloat(e.target.value),
+                                muted: false,
+                              })
+                            }
+                            className="mt-1 w-full accent-amber-400 cursor-pointer"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Graphics Quality Section */}
+                      <div className="rounded-xl border border-amber-100/15 bg-[#150e0a]/85 p-3">
+                        <div className="flex items-center justify-between mb-2">
+                          <span className="font-bold text-amber-200">
+                            Graphics Quality
+                          </span>
+                          <span className="font-mono text-[11px] uppercase text-amber-300">
+                            {hud.graphicsQuality}
+                          </span>
+                        </div>
+                        <div className="grid grid-cols-3 gap-1.5">
+                          {GRAPHICS_QUALITY_OPTIONS.map((opt) => {
+                            const active = hud.graphicsQuality === opt.id;
+                            return (
+                              <button
+                                key={opt.id}
+                                type="button"
+                                onClick={() => {
+                                  engineRef.current?.playUiClick();
+                                  handleGraphicsQualityChange(opt.id);
+                                }}
+                                aria-pressed={active}
+                                className={`min-h-[34px] rounded-lg border px-2 py-1 text-xs font-bold transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                                  active
+                                    ? 'bg-amber-500 text-[#1d140e] border-amber-200'
+                                    : 'bg-[#1e140e] text-amber-100/75 border-amber-100/15 hover:border-amber-200/40'
+                                }`}
+                              >
+                                {opt.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+
+                      {/* Controls & Camera Section */}
+                      <div className="rounded-xl border border-amber-100/15 bg-[#150e0a]/85 p-3 space-y-2.5">
+                        <div className="flex items-center justify-between">
+                          <span className="font-bold text-amber-200">
+                            Camera &amp; Controls
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleResetCameraSettings}
+                            className="text-[11px] font-semibold text-amber-300 hover:text-amber-200 cursor-pointer"
+                          >
+                            Reset
+                          </button>
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between text-amber-100/85">
+                            <label htmlFor="menu-cam-sens">Rotation Sensitivity</label>
+                            <span className="font-mono tabular-nums text-amber-300">
+                              {hud.cameraSettings.sensitivity.toFixed(2)}×
+                            </span>
+                          </div>
+                          <input
+                            id="menu-cam-sens"
+                            type="range"
+                            min={CAMERA_MIN_SENSITIVITY}
+                            max={CAMERA_MAX_SENSITIVITY}
+                            step={0.05}
+                            value={hud.cameraSettings.sensitivity}
+                            onChange={(e) =>
+                              handleCameraSettingChange({
+                                sensitivity: parseFloat(e.target.value),
+                              })
+                            }
+                            className="mt-1 w-full accent-amber-400 cursor-pointer"
+                          />
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between text-amber-100/85">
+                            <label htmlFor="menu-cam-zoom">Zoom Distance</label>
+                            <span className="font-mono tabular-nums text-amber-300">
+                              {hud.cameraSettings.zoomDistance.toFixed(1)}m
+                            </span>
+                          </div>
+                          <input
+                            id="menu-cam-zoom"
+                            type="range"
+                            min={CAMERA_MIN_ZOOM}
+                            max={CAMERA_MAX_ZOOM}
+                            step={0.2}
+                            value={hud.cameraSettings.zoomDistance}
+                            onChange={(e) =>
+                              handleCameraSettingChange({
+                                zoomDistance: parseFloat(e.target.value),
+                              })
+                            }
+                            className="mt-1 w-full accent-amber-400 cursor-pointer"
+                          />
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between text-amber-100/85">
+                            <label htmlFor="menu-cam-zoom-spd">Zoom Speed</label>
+                            <span className="font-mono tabular-nums text-amber-300">
+                              {hud.cameraSettings.zoomSpeed.toFixed(2)}×
+                            </span>
+                          </div>
+                          <input
+                            id="menu-cam-zoom-spd"
+                            type="range"
+                            min={CAMERA_MIN_ZOOM_SPEED}
+                            max={CAMERA_MAX_ZOOM_SPEED}
+                            step={0.1}
+                            value={hud.cameraSettings.zoomSpeed}
+                            onChange={(e) =>
+                              handleCameraSettingChange({
+                                zoomSpeed: parseFloat(e.target.value),
+                              })
+                            }
+                            className="mt-1 w-full accent-amber-400 cursor-pointer"
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between pt-1">
+                          <span className="text-amber-100/85">Auto-Follow Movement</span>
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={hud.cameraSettings.autoFollow}
+                            onClick={() =>
+                              handleCameraSettingChange({
+                                autoFollow: !hud.cameraSettings.autoFollow,
+                              })
+                            }
+                            className={`min-w-[52px] min-h-[28px] rounded-lg border px-2 py-0.5 text-xs font-semibold cursor-pointer ${
+                              hud.cameraSettings.autoFollow
+                                ? 'bg-amber-500 text-[#1d140e] border-amber-200'
+                                : 'bg-[#1e140e] text-amber-100/75 border-amber-100/20'
+                            }`}
+                          >
+                            {hud.cameraSettings.autoFollow ? 'On' : 'Off'}
+                          </button>
+                        </div>
+
+                        <div className="border-t border-amber-100/12 pt-2 text-[11px] text-amber-100/70 leading-relaxed">
+                          Mobile: Left joystick move · JUMP button · HIDE / TAG button · Swipe camera · Pinch zoom.
+                          <br />
+                          Desktop: WASD move · Space jump · C hide · E tag · Drag rotate · R center.
+                        </div>
+                      </div>
                     </div>
-                  </button>
+                  )}
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleStartMatch}
-                  className="mt-2 sm:mt-3 w-full min-h-[40px] sm:min-h-[46px] rounded-xl bg-[#d96b27] hover:bg-[#e57731] active:scale-[0.98] px-3 sm:px-5 py-2 text-xs sm:text-sm font-semibold text-white truncate transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
-                >
-                  Play Level {activeLevel.id}: {activeLevel.shortName} ({displayChosenName})
-                </button>
+                {/* Pinned Solo Team Selection + Play Button (shown in Levels & Character sub-screens) */}
+                {(startScreen === 'levels' || startScreen === 'character') &&
+                  !isInOnlineRoom && (
+                    <div className="mt-2 sm:mt-3 border-t border-amber-100/12 pt-2 sm:pt-3 shrink-0">
+                      <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            engineRef.current?.playUiClick();
+                            setChosenRole('hider');
+                          }}
+                          aria-pressed={chosenRole === 'hider'}
+                          className={`flex items-center gap-1.5 sm:gap-2 min-w-0 rounded-lg sm:rounded-xl border px-2.5 py-1.5 sm:px-3 sm:py-2 text-left transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                            chosenRole === 'hider'
+                              ? 'bg-amber-500/20 border-amber-300 text-amber-50'
+                              : 'bg-[#150e0a]/80 border-amber-100/15 text-amber-100/75 hover:border-amber-200/35'
+                          }`}
+                        >
+                          <EyeOff className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-300 shrink-0" aria-hidden="true" />
+                          <div className="min-w-0">
+                            <div className="text-[11px] sm:text-xs font-bold leading-tight">Hider</div>
+                            <div className="text-[9.5px] sm:text-[10px] text-amber-100/70 truncate">12s hide · 3m</div>
+                          </div>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            engineRef.current?.playUiClick();
+                            setChosenRole('seeker');
+                          }}
+                          aria-pressed={chosenRole === 'seeker'}
+                          className={`flex items-center gap-1.5 sm:gap-2 min-w-0 rounded-lg sm:rounded-xl border px-2.5 py-1.5 sm:px-3 sm:py-2 text-left transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                            chosenRole === 'seeker'
+                              ? 'bg-[#d96b27]/25 border-amber-300 text-amber-50'
+                              : 'bg-[#150e0a]/80 border-amber-100/15 text-amber-100/75 hover:border-amber-200/35'
+                          }`}
+                        >
+                          <Search className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-300 shrink-0" aria-hidden="true" />
+                          <div className="min-w-0">
+                            <div className="text-[11px] sm:text-xs font-bold leading-tight">Seeker</div>
+                            <div className="text-[9.5px] sm:text-[10px] text-amber-100/70 truncate">Count 12s · Tag 4</div>
+                          </div>
+                        </button>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleStartMatch}
+                        className="mt-2 sm:mt-3 w-full min-h-[40px] sm:min-h-[46px] rounded-xl bg-[#d96b27] hover:bg-[#e57731] active:scale-[0.98] px-3 sm:px-5 py-2 text-xs sm:text-sm font-semibold text-white truncate transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                      >
+                        Play Level {activeLevel.id}: {activeLevel.shortName} ({displayChosenName})
+                      </button>
+                    </div>
+                  )}
+
+                {/* Quick button back to active room if player edited character while waiting */}
+                {startScreen !== 'online' && isInOnlineRoom && (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenStartSection('online')}
+                    className="mt-2 sm:mt-3 shrink-0 w-full inline-flex items-center justify-center gap-2 min-h-[40px] sm:min-h-[44px] rounded-xl bg-amber-500 hover:bg-amber-400 px-4 py-2 text-xs sm:text-sm font-bold text-[#1d140e] transition-colors cursor-pointer"
+                  >
+                    <Users className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span className="truncate">
+                      Back to Room {onlineRoom.code} ({onlineRoom.players.length}/{MAX_ROOM_PLAYERS})
+                    </span>
+                  </button>
+                )}
               </div>
             )}
+          </div>
+        </div>
+      )}
 
-            {/* Quick button back to active room if player edited character while waiting */}
-            {startTab !== 'online' && isInOnlineRoom && (
+      {/* Quit Confirmation Modal (shown on browsers where programmatic window.close is restricted) */}
+      {showQuitModal && (
+        <div
+          onPointerDown={(e) => e.stopPropagation()}
+          className="absolute inset-0 z-40 flex items-center justify-center bg-[#120b07]/78 p-4"
+        >
+          <div className="w-full max-w-[340px] rounded-2xl border border-amber-200/25 bg-[#1f150f] p-5 text-center shadow-2xl">
+            <h2 className="font-display text-lg font-bold text-amber-50">
+              Leave the Village?
+            </h2>
+            <p className="mt-1.5 text-xs text-amber-100/80 leading-relaxed">
+              Your unlocked levels ({hud.unlockedLevel}/{TOTAL_LEVELS}) and character settings are saved. You can safely close this browser tab or return to play.
+            </p>
+            <div className="mt-4 flex items-center gap-2">
               <button
                 type="button"
-                onClick={() => setStartTab('online')}
-                className="mt-2 sm:mt-3 shrink-0 w-full inline-flex items-center justify-center gap-2 min-h-[40px] sm:min-h-[44px] rounded-xl bg-amber-500 hover:bg-amber-400 px-4 py-2 text-xs sm:text-sm font-bold text-[#1d140e] transition-colors cursor-pointer"
+                onClick={() => {
+                  engineRef.current?.playUiClick();
+                  setShowQuitModal(false);
+                }}
+                className="flex-1 min-h-[42px] rounded-xl bg-[#d96b27] hover:bg-[#e57731] px-4 py-2 text-xs font-bold text-white cursor-pointer"
               >
-                <Users className="w-4 h-4 shrink-0" aria-hidden="true" />
-                <span className="truncate">
-                  Back to Room {onlineRoom.code} ({onlineRoom.players.length}/{MAX_ROOM_PLAYERS})
-                </span>
+                Return to Menu
               </button>
-            )}
+            </div>
           </div>
         </div>
       )}
@@ -2792,6 +4303,27 @@ export default function App() {
                 ? `${hud.remainingHiders} ${hud.remainingHiders === 1 ? 'hider' : 'hiders'} survived until the 3-minute timer ran out.`
                 : `All ${hud.totalHiders} hiders were caught with ${formatClock(hud.timeRemaining)} remaining.`}
             </p>
+
+            {lastMatchEarnedStars > 0 && (
+              <div className="mt-2 inline-flex items-center justify-center gap-2 rounded-xl border border-amber-300/35 bg-[#150e0a]/90 px-3 py-1">
+                <div className="flex items-center gap-0.5">
+                  {[1, 2, 3].map((idx) => (
+                    <Star
+                      key={idx}
+                      className={`w-4 h-4 ${
+                        idx <= lastMatchEarnedStars
+                          ? 'fill-amber-400 text-amber-400'
+                          : 'text-amber-100/20'
+                      }`}
+                      aria-hidden="true"
+                    />
+                  ))}
+                </div>
+                <span className="text-[11px] font-bold text-amber-200 tabular-nums">
+                  {lastMatchEarnedStars} {lastMatchEarnedStars === 1 ? 'Star' : 'Stars'} · Streak {playerProfile.currentWinStreak}
+                </span>
+              </div>
+            )}
 
             {hud.newlyUnlockedLevel !== null && (
               <div className="mt-2.5 rounded-lg bg-emerald-950/75 border border-emerald-400/35 px-3 py-1.5 text-[11px] sm:text-xs font-semibold text-emerald-200">
@@ -3019,7 +4551,7 @@ export default function App() {
                   onClick={handleSwitchTeam}
                   className="mt-2 w-full inline-flex items-center justify-center min-h-[38px] sm:min-h-[42px] rounded-xl bg-[#18100b] hover:bg-[#2a1d15] border border-amber-100/15 px-4 py-1.5 text-[11px] sm:text-xs font-semibold text-amber-100/85 transition-colors whitespace-nowrap cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
                 >
-                  Levels &amp; Setup
+                  Main Menu
                 </button>
               </>
             )}
@@ -3121,6 +4653,124 @@ export default function App() {
           </form>
         </div>
       )}
+
+      {/* Live Incoming Friend Request & Room Invite Notification Toast */}
+      {(() => {
+        const pendingInvite = visibleIncomingRoomInvites.find(
+          (inv) =>
+            !dismissedNotifyIds[`inv:${inv.id}:${inv.updatedAtMs}`] &&
+            inv.roomCode !== onlineRoom?.code,
+        );
+        const pendingReq = incomingFriendRequests.find(
+          (req) => !dismissedNotifyIds[`req:${req.id}`],
+        );
+        if (!pendingInvite && !pendingReq) return null;
+
+        if (pendingInvite) {
+          const inviteKey = `inv:${pendingInvite.id}:${pendingInvite.updatedAtMs}`;
+          const lvl = getLevelConfig(pendingInvite.levelId);
+          return (
+            <div
+              onPointerDown={(e) => e.stopPropagation()}
+              className="pointer-events-auto absolute top-14 left-1/2 -translate-x-1/2 z-40 w-[calc(100vw-1.5rem)] max-w-[390px] rounded-xl border border-emerald-300/45 bg-[#19120c]/96 px-3 py-2 shadow-2xl"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <ProfileAvatar
+                    avatarId={pendingInvite.fromAvatarId}
+                    sizeClass="w-8 h-8"
+                  />
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-bold text-emerald-200 truncate">
+                      Room Invite · {pendingInvite.fromUsername}
+                    </div>
+                    <div className="text-[10px] text-amber-100/80 truncate">
+                      Join Room {pendingInvite.roomCode} ({lvl.shortName})
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleAcceptRoomInvite(pendingInvite)}
+                    className="min-h-[28px] rounded-lg bg-emerald-600 hover:bg-emerald-500 px-2.5 py-1 text-[10.5px] font-bold text-white cursor-pointer"
+                  >
+                    Join
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setDismissedNotifyIds((prev) => ({
+                        ...prev,
+                        [inviteKey]: true,
+                      }))
+                    }
+                    aria-label="Dismiss notification"
+                    className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-amber-100/65 hover:text-white cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        }
+
+        if (pendingReq && hud.phase === 'start' && startScreen !== 'friends') {
+          const reqKey = `req:${pendingReq.id}`;
+          return (
+            <div
+              onPointerDown={(e) => e.stopPropagation()}
+              className="pointer-events-auto absolute top-14 left-1/2 -translate-x-1/2 z-40 w-[calc(100vw-1.5rem)] max-w-[390px] rounded-xl border border-amber-300/45 bg-[#1f150f]/96 px-3 py-2 shadow-2xl"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 min-w-0">
+                  <Bell className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
+                  <div className="min-w-0">
+                    <div className="text-[11px] font-bold text-amber-50 truncate">
+                      {pendingReq.fromUsername} sent a friend request
+                    </div>
+                    <div className="text-[10px] text-amber-200/75">
+                      Tap Accept or open Friends
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => void handleAcceptFriendRequest(pendingReq)}
+                    className="min-h-[28px] rounded-lg bg-emerald-600 hover:bg-emerald-500 px-2.5 py-1 text-[10.5px] font-bold text-white cursor-pointer"
+                  >
+                    Accept
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleOpenStartSection('friends')}
+                    className="min-h-[28px] rounded-lg border border-amber-200/25 bg-[#2a1c13] px-2 py-1 text-[10.5px] font-semibold text-amber-100 cursor-pointer"
+                  >
+                    View
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setDismissedNotifyIds((prev) => ({
+                        ...prev,
+                        [reqKey]: true,
+                      }))
+                    }
+                    aria-label="Dismiss notification"
+                    className="inline-flex items-center justify-center w-7 h-7 rounded-lg text-amber-100/65 hover:text-white cursor-pointer"
+                  >
+                    <X className="w-3.5 h-3.5" aria-hidden="true" />
+                  </button>
+                </div>
+              </div>
+            </div>
+          );
+        }
+
+        return null;
+      })()}
 
       {/* Transient Safety / Mute / Report Confirmation Notice */}
       {safetyNotice && (

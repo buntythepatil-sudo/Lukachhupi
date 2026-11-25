@@ -85,7 +85,7 @@ export class VillageAudioEngine {
   // Schedulers & timers
   private footstepTimer = 0;
   private stepToggle = false;
-  private musicBeatTimer = 0.6;
+  private musicBeatTimer = 0.08;
   private musicPhraseIdx = 0;
   private musicNoteIdx = 0;
   private tablaStep = 0;
@@ -425,15 +425,21 @@ export class VillageAudioEngine {
       this.playSantoorPluck(BHUPALI_SCALE[chordIdx] * 0.5, 0.085);
     }
 
-    // Gentle mellow village tabla groove during active play
+    // Gentle mellow village tabla groove (very soft on menu, livelier during active play)
+    const cycle = this.tablaStep % 8;
     if (phase === 'playing') {
-      const cycle = this.tablaStep % 8;
       if (cycle === 0) {
         this.playSoftTabla(true, 0.16); // Dha (bayan)
       } else if (cycle === 2 || cycle === 6) {
         this.playSoftTabla(false, 0.08); // Tin (dayan)
       } else if (cycle === 4) {
         this.playSoftTabla(true, 0.11); // Soft low beat
+      }
+    } else if (phase === 'start') {
+      if (cycle === 0) {
+        this.playSoftTabla(true, 0.065);
+      } else if (cycle === 4) {
+        this.playSoftTabla(false, 0.04);
       }
     }
 
@@ -1209,6 +1215,24 @@ export class VillageAudioEngine {
     env.connect(this.sfxGain);
     osc.start(now);
     osc.stop(now + 0.16);
+  }
+
+  /** Warm bamboo wood-tap sound for Main Menu navigation & unlocks Web Audio */
+  public playUiClick(): void {
+    if (!this.ensureReady() || !this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(520, now);
+    osc.frequency.exponentialRampToValueAtTime(290, now + 0.055);
+    const env = this.ctx.createGain();
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(0.14, now + 0.005);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + 0.065);
+    osc.connect(env);
+    env.connect(this.sfxGain);
+    osc.start(now);
+    osc.stop(now + 0.075);
   }
 
   public playSeekStart(): void {

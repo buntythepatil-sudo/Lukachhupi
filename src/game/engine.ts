@@ -281,6 +281,13 @@ export class ChhupanChhupaiEngine {
   private activeLevelConfig: LevelConfig = getLevelConfig(1);
 
   private previewRig: CharacterRig | null = null;
+  private backgroundCastRigs: Array<{
+    rig: CharacterRig;
+    baseRotY: number;
+    phaseOffset: number;
+    animMode: 'wave' | 'clap' | 'laugh' | 'showcase';
+  }> = [];
+  private startShowcaseMode: 'menu' | 'panel' = 'menu';
   private actors: ParticipantActor[] = [];
   private playerActor: ParticipantActor | null = null;
   private seekerActor: ParticipantActor | null = null;
@@ -290,6 +297,7 @@ export class ChhupanChhupaiEngine {
   private currentCustomization: CharacterCustomization =
     createCustomizationFromPreset(VILLAGE_CHARACTER_PRESETS[0]);
   private winner: MatchWinner = null;
+  private matchSequenceId = 0;
   private pendingWinner: MatchWinner = null;
   private pendingEndTimer = 0;
   private timeRemaining = MATCH_DURATION_SECONDS;
@@ -805,6 +813,14 @@ export class ChhupanChhupaiEngine {
     this.startMatch(this.selectedRole, this.currentCustomization);
   }
 
+  public setUnlockedLevel(level: number): void {
+    const clamped = Math.max(1, Math.min(TOTAL_LEVELS, Math.floor(level)));
+    if (clamped === this.unlockedLevel) return;
+    this.unlockedLevel = clamped;
+    saveUnlockedLevel(clamped);
+    this.emitHud();
+  }
+
   public updateAudioSettings(partial: Partial<AudioSettings>): void {
     this.audio.unlock();
     this.audio.updateSettings(partial);
@@ -1021,11 +1037,17 @@ export class ChhupanChhupaiEngine {
       disposeCharacterRig(this.previewRig);
       this.previewRig = null;
     }
+    for (let i = 0; i < this.backgroundCastRigs.length; i++) {
+      const bg = this.backgroundCastRigs[i];
+      this.scene.remove(bg.rig.root);
+      disposeCharacterRig(bg.rig);
+    }
+    this.backgroundCastRigs = [];
   }
 
   /**
-   * Builds/updates the live 3D showcase character standing in the active level
-   * foreground on the start screen.
+   * Builds/updates the live 3D showcase character plus animated village friends
+   * standing in the active level courtyard on the start / main menu screen.
    */
   private rebuildPreviewCharacter(): void {
     if (!this.textures || this.phase !== 'start') return;
@@ -1041,6 +1063,82 @@ export class ChhupanChhupaiEngine {
     rig.root.rotation.y = 0.24;
     this.scene.add(rig.root);
     this.previewRig = rig;
+
+    // Add 4 animated village companions standing in the courtyard background
+    const companions = VILLAGE_CHARACTER_PRESETS.filter(
+      (p) => p.id !== this.currentCustomization.presetId,
+    );
+    const companionSlots: Array<{
+      dx: number;
+      dz: number;
+      rotY: number;
+      animMode: 'wave' | 'clap' | 'laugh' | 'showcase';
+      isSeekerLook: boolean;
+    }> = [
+      { dx: -1.42, dz: -2.05, rotY: 0.34, animMode: 'wave', isSeekerLook: false },
+      { dx: -0.58, dz: -3.05, rotY: 0.14, animMode: 'clap', isSeekerLook: false },
+      {
+        dx: 0.65,
+        dz: -2.95,
+        rotY: -0.18,
+        animMode: 'laugh',
+        isSeekerLook: this.selectedRole !== 'seeker',
+      },
+      { dx: 1.46, dz: -2.0, rotY: -0.36, animMode: 'showcase', isSeekerLook: false },
+    ];
+
+    for (let i = 0; i < companionSlots.length; i++) {
+      const slot = companionSlots[i];
+      const preset = companions[i % companions.length];
+      if (!preset) continue;
+
+      const bgRig = createCustomizedCharacter(
+        {
+          preset,
+          outfitStyle: preset.outfitStyle,
+          outfitColor: preset.outfitColor,
+          accessory: preset.accessory,
+          isSeeker: slot.isSeekerLook,
+          includeTagRing: false,
+        },
+        this.textures.contactShadow,
+      );
+
+      _probePos.set(
+        previewPos[0] + slot.dx,
+        previewPos[1],
+        previewPos[2] + slot.dz,
+      );
+      this.resolveCollisions(_probePos, CHAR_RADIUS * 1.15);
+
+      const dHero = Math.hypot(
+        _probePos.x - previewPos[0],
+        _probePos.z - previewPos[2],
+      );
+      if (dHero < 1.15) {
+        _probePos.z = previewPos[2] - 1.5;
+        _probePos.x = previewPos[0] + (slot.dx < 0 ? -1.1 : 1.1);
+        this.resolveCollisions(_probePos, CHAR_RADIUS * 1.1);
+      }
+
+      bgRig.root.position.set(_probePos.x, previewPos[1], _probePos.z);
+      bgRig.root.rotation.y = slot.rotY;
+      this.scene.add(bgRig.root);
+      this.backgroundCastRigs.push({
+        rig: bgRig,
+        baseRotY: slot.rotY,
+        phaseOffset: i * 1.45,
+        animMode: slot.animMode,
+      });
+    }
+  }
+
+  public setStartShowcaseMode(mode: 'menu' | 'panel'): void {
+    this.startShowcaseMode = mode;
+  }
+
+  public playUiClick(): void {
+    this.audio.playUiClick();
   }
 
   public updateStartPreview(
@@ -1268,6 +1366,7 @@ export class ChhupanChhupaiEngine {
     this.onlineMode = false;
     this.onlineLocalPlayerId = null;
     this.currentOnlineRound = 0;
+    this.matchSequenceId += 1;
     this.audio.unlock();
     this.phase = 'playing';
     this.keysPressed.clear();
@@ -1328,6 +1427,7 @@ export class ChhupanChhupaiEngine {
     this.onlineMode = true;
     this.onlineLocalPlayerId = localPlayerId;
     this.currentOnlineRound = room.roundNumber;
+    this.matchSequenceId += 1;
     this.onlineSendAccum = 0;
     this.phase = 'playing';
     this.keysPressed.clear();
@@ -2979,16 +3079,36 @@ export class ChhupanChhupaiEngine {
 
   private updateCamera(dt: number): void {
     if (this.phase === 'start') {
-      // Portrait-framed showcase of the selected 3D character on the left side of the active map
-      // so the right-side character/level panel never obscures the character!
       const sp = this.activeSpawnPoints;
-      const camBaseX = sp ? sp.previewCamPos[0] : 1.25;
-      const camBaseY = sp ? sp.previewCamPos[1] : 1.85;
-      const camBaseZ = sp ? sp.previewCamPos[2] : 11.45;
-      const lookX = sp ? sp.previewLookAt[0] : 1.15;
-      const lookY = sp ? sp.previewLookAt[1] : 1.05;
-      const lookZ = sp ? sp.previewLookAt[2] : 7.2;
-      const swayX = Math.sin(this.elapsed * 0.45) * 0.25;
+      const previewPos = sp?.previewPos ?? [0.2, 0, 7.6];
+
+      let camBaseX: number;
+      let camBaseY: number;
+      let camBaseZ: number;
+      let lookX: number;
+      let lookY: number;
+      let lookZ: number;
+      let swayX: number;
+
+      if (this.startShowcaseMode === 'menu') {
+        // Centered 9:16 portrait main menu framing: player hero + animated village cast
+        // stand cleanly in the open courtyard between the top title and bottom menu buttons.
+        camBaseX = previewPos[0];
+        camBaseY = previewPos[1] + 2.02;
+        camBaseZ = previewPos[2] + 5.35;
+        lookX = previewPos[0];
+        lookY = previewPos[1] + 0.56;
+        lookZ = previewPos[2] - 1.25;
+        swayX = Math.sin(this.elapsed * 0.34) * 0.52;
+      } else {
+        camBaseX = sp ? sp.previewCamPos[0] : 1.25;
+        camBaseY = sp ? sp.previewCamPos[1] : 1.85;
+        camBaseZ = sp ? sp.previewCamPos[2] : 11.45;
+        lookX = sp ? sp.previewLookAt[0] : 1.15;
+        lookY = sp ? sp.previewLookAt[1] : 1.05;
+        lookZ = sp ? sp.previewLookAt[2] : 7.2;
+        swayX = Math.sin(this.elapsed * 0.45) * 0.25;
+      }
 
       _camGoal.set(camBaseX + swayX, camBaseY, camBaseZ);
       _lookGoal.set(lookX, lookY, lookZ);
@@ -3020,7 +3140,7 @@ export class ChhupanChhupaiEngine {
         this.sunLight.position.set(lookX + atmSun[0] * 0.8, atmSun[1] * 0.85, lookZ + atmSun[2] * 0.8);
       }
       if (this.faceFillLight) {
-        this.faceFillLight.target.position.set(lookX, lookY + 0.15, lookZ);
+        this.faceFillLight.target.position.set(lookX, previewPos[1] + 1.15, previewPos[2] - 0.8);
         this.faceFillLight.position.set(
           _camGoal.x + 1.1,
           _camGoal.y + 0.65,
@@ -3223,11 +3343,30 @@ export class ChhupanChhupaiEngine {
     const audioSettings =
       this.audio?.getSettings() ?? createDefaultAudioSettings();
 
+    const matchEndedResult =
+      this.phase === 'ended' && this.winner !== null
+        ? {
+            matchId: this.matchSequenceId,
+            levelId: this.currentLevelId,
+            playerRole: this.selectedRole,
+            playerWon:
+              (this.winner === 'hiders' && this.selectedRole === 'hider') ||
+              (this.winner === 'seekers' && this.selectedRole === 'seeker'),
+            playerCaught: this.playerActor?.caught ?? false,
+            timeRemaining: roundedTime,
+            remainingHiders,
+            totalHiders: hiders.length || 4,
+            caughtCount,
+            isOnline: this.onlineMode,
+          }
+        : null;
+
     const key = [
       this.phase,
       this.selectedRole,
       playerName,
       this.winner ?? '',
+      this.matchSequenceId,
       roundedTime,
       countdownSeconds,
       this.playerActor?.isHiding ?? false,
@@ -3291,6 +3430,7 @@ export class ChhupanChhupaiEngine {
       levelName: this.activeLevelConfig.name,
       difficultyLabel: this.activeLevelConfig.difficultyLabel,
       webglError,
+      matchResult: matchEndedResult,
     });
   }
 
@@ -3416,13 +3556,45 @@ export class ChhupanChhupaiEngine {
 
           // Showcase selected 3D character (or active waiting-lobby emote!)
           this.previewRig.root.rotation.y =
-            0.24 + Math.sin(this.elapsed * 0.55) * 0.22;
+            (this.startShowcaseMode === 'menu' ? 0.08 : 0.24) +
+            Math.sin(this.elapsed * 0.55) * 0.2;
           this.previewRig.updateAnimation({
             dt,
             moveSpeed: 0,
             state: this.previewEmote
               ? emoteToAnimState(this.previewEmote)
               : 'showcase',
+            expression: this.previewEmote ? undefined : 'happy',
+          });
+        }
+
+        // Animate companion village characters standing in the background courtyard
+        for (let i = 0; i < this.backgroundCastRigs.length; i++) {
+          const bg = this.backgroundCastRigs[i];
+          const tCycle = (this.elapsed + bg.phaseOffset) % 6.4;
+          let state: CharacterAnimState = 'showcase';
+          let expression: FacialExpression = 'happy';
+
+          if (bg.animMode === 'wave' && tCycle < 2.5) {
+            state = 'emote_wave';
+            expression = 'excited';
+          } else if (bg.animMode === 'clap' && tCycle >= 1.2 && tCycle < 3.4) {
+            state = 'emote_clap';
+            expression = 'happy';
+          } else if (bg.animMode === 'laugh' && tCycle >= 2.2 && tCycle < 4.5) {
+            state = 'emote_laugh';
+            expression = 'excited';
+          }
+
+          bg.rig.root.rotation.y =
+            bg.baseRotY +
+            Math.sin(this.elapsed * 0.42 + bg.phaseOffset) * 0.15;
+          bg.rig.updateAnimation({
+            dt,
+            moveSpeed: 0,
+            state,
+            lookAroundPhase: this.elapsed * 0.6 + bg.phaseOffset,
+            expression,
           });
         }
       } else if (this.phase === 'playing') {
