@@ -1,0 +1,6 @@
+{
+  "name": "Gully Chhupan Chhupai 1995",
+  "description": "A nostalgic 1990s Indian village 3D hide-and-seek browser game.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
