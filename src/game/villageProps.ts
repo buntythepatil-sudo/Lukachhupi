@@ -5,6 +5,7 @@ import {
   CircleCollider,
   HidingSpot,
   HouseInterior,
+  TempleBellInteractive,
 } from './types';
 
 export interface LandmarkBuild {
@@ -15,6 +16,7 @@ export interface LandmarkBuild {
   interiors?: HouseInterior[];
   swayObjects?: THREE.Object3D[];
   waterMesh?: THREE.Mesh;
+  templeBells?: TempleBellInteractive[];
 }
 
 /**
@@ -959,12 +961,88 @@ export function buildVillageTemple(
   porchRoof.castShadow = true;
   group.add(porchRoof);
 
-  const bell = new THREE.Mesh(
-    new THREE.ConeGeometry(0.22, 0.34, 10),
+  // Articulated swinging brass Mandir Ghanta (Temple Bell) with chain, flared body, clapper & acoustic ring
+  const bellPivot = new THREE.Group();
+  bellPivot.position.set(0, 3.22, 2.7);
+  group.add(bellPivot);
+
+  const chain = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.022, 0.022, 0.44, 7),
     brassMat,
   );
-  bell.position.set(0, 2.78, 2.7);
-  group.add(bell);
+  chain.position.y = -0.22;
+  bellPivot.add(chain);
+
+  const bellCrown = new THREE.Mesh(
+    new THREE.SphereGeometry(0.11, 10, 8),
+    brassMat,
+  );
+  bellCrown.position.y = -0.45;
+  bellPivot.add(bellCrown);
+
+  const bellBody = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.105, 0.25, 0.36, 14),
+    brassMat,
+  );
+  bellBody.position.y = -0.64;
+  bellBody.castShadow = true;
+  bellPivot.add(bellBody);
+
+  const bellLip = new THREE.Mesh(
+    new THREE.TorusGeometry(0.242, 0.024, 8, 16),
+    brassMat,
+  );
+  bellLip.rotation.x = Math.PI / 2;
+  bellLip.position.y = -0.82;
+  bellPivot.add(bellLip);
+
+  const clapperPivot = new THREE.Group();
+  clapperPivot.position.set(0, -0.56, 0);
+  bellPivot.add(clapperPivot);
+
+  const clapperStem = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.015, 0.015, 0.32, 6),
+    brassMat,
+  );
+  clapperStem.position.y = -0.16;
+  const clapperBall = new THREE.Mesh(
+    new THREE.SphereGeometry(0.056, 8, 8),
+    brassMat,
+  );
+  clapperBall.position.y = -0.32;
+  clapperPivot.add(clapperStem, clapperBall);
+
+  // Subtle expanding golden shimmer wave shown when player rings the temple bell
+  const ringWave = new THREE.Mesh(
+    new THREE.RingGeometry(0.28, 0.42, 24),
+    new THREE.MeshBasicMaterial({
+      color: 0xffd76a,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }),
+  );
+  ringWave.rotation.x = Math.PI / 2;
+  ringWave.position.set(0, 2.38, 2.7);
+  ringWave.visible = false;
+  group.add(ringWave);
+
+  const templeBells: TempleBellInteractive[] = [
+    {
+      pivot: bellPivot,
+      clapper: clapperPivot,
+      ringWave,
+      worldX: x,
+      worldY: 2.55,
+      worldZ: z + 2.7,
+      swingAngle: 0,
+      swingVel: 0,
+      swingDir: 1,
+      waveProgress: 1,
+      label: 'Temple Bell',
+    },
+  ];
 
   const boxes: BoxCollider[] = [
     {
@@ -988,7 +1066,7 @@ export function buildVillageTemple(
     },
   ];
 
-  return { group, boxes, circles, hidingSpots, swayObjects: [flag] };
+  return { group, boxes, circles, hidingSpots, swayObjects: [flag], templeBells };
 }
 
 /**

@@ -7,6 +7,7 @@ import { WebSocket, WebSocketServer } from 'ws';
 import type {
   CharacterAnimState,
   CharacterCustomization,
+  FacialExpression,
   MatchWinner,
   OutfitStyle,
   AccessoryType,
@@ -29,6 +30,14 @@ import {
   getEmoteDefinition,
   MAX_REPORT_DETAILS_LENGTH,
 } from './src/game/chatFilter.ts';
+import {
+  extractBearerToken,
+  verifyFirebaseIdToken,
+} from './src/server/firebaseTokenVerifier.ts';
+import {
+  LeaderboardPeriod,
+  verifiedLeaderboardStore,
+} from './src/server/leaderboardStore.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,6 +50,9 @@ const MIN_PLAYERS_TO_START = 2;
 const MATCH_DURATION_SECONDS = 180;
 const HEADSTART_SECONDS = 12;
 const SERVER_TAG_RANGE = 3.95; // Slight latency tolerance above client 3.25m tag range
+const SERVER_SLAP_RANGE = 3.4; // Proximity tolerance for playful hider-to-hider slap
+const HIDER_SLAP_COOLDOWN_MS = 1500;
+const MIN_VERIFIED_ONLINE_MATCH_MS = 15_000;
 const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 const TOTAL_LEVELS = 8;
 
@@ -73,12 +85,32 @@ const ALLOWED_ANIM_STATES = new Set<CharacterAnimState>([
   'tag_lunge',
   'caught_funny',
   'showcase',
+  'handshake',
+  'sit_down',
+  'sitting',
+  'stand_up',
   'emote_laugh',
+  'emote_surprise',
   'emote_wave',
   'emote_dance',
   'emote_clap',
   'emote_cry',
 ]);
+
+const ALLOWED_EXPRESSIONS = new Set<FacialExpression>([
+  'neutral',
+  'happy',
+  'laughing',
+  'excited',
+  'fear',
+  'surprise',
+  'sad',
+  'determined',
+  'counting',
+]);
+
+const SERVER_HANDSHAKE_RANGE = 3.5;
+const HANDSHAKE_COOLDOWN_MS = 2200;
 
 const MAX_CHAT_HISTORY = 40;
 const MAX_ROOM_REPORTS = 50;
@@ -128,83 +160,83 @@ const LEVEL_SERVER_SPAWNS: Record<number, LevelServerSpawns> = {
     ],
   },
   3: {
-    worldRadius: 43.5,
-    seeker: [1.8, 1.2, 0],
+    worldRadius: 58.5,
+    seeker: [0.0, 2.0, Math.PI],
     hiders: [
-      [-1.8, 7.2, Math.PI],
-      [-17.5, -5.0, 0.5],
-      [17.5, 6.0, -0.7],
-      [0.0, -17.5, 2.8],
-      [-18.0, -18.0, 0.8],
-      [18.0, -18.0, -0.8],
-      [18.0, 18.0, -2.2],
-      [-18.0, 18.0, 2.2],
-      [0.0, 18.0, Math.PI],
-      [-18.0, 0.0, 1.5],
+      [0.0, -6.5, 0.0],
+      [0.0, -28.0, 0.0],
+      [0.0, 28.0, Math.PI],
+      [-22.0, 2.0, 1.57],
+      [22.0, 2.0, -1.57],
+      [-36.0, -20.0, 0.8],
+      [36.0, -20.0, -0.8],
+      [-36.0, 20.0, 2.3],
+      [36.0, 20.0, -2.3],
+      [0.0, -36.0, 0.0],
     ],
   },
   4: {
-    worldRadius: 42.5,
-    seeker: [2.2, 2.2, 0],
+    worldRadius: 56.5,
+    seeker: [0.0, 3.8, Math.PI],
     hiders: [
-      [-2.0, 7.5, Math.PI],
-      [-14.5, -8.5, 0.4],
-      [14.5, 8.5, -0.5],
-      [0.0, -15.5, 3.0],
-      [-14.5, -14.5, 0.6],
-      [14.5, -14.5, -0.6],
-      [14.5, 14.5, -2.4],
-      [-14.5, 14.5, 2.4],
-      [-28.0, 0.0, 1.5],
-      [28.0, 0.0, -1.5],
+      [0.0, 18.0, Math.PI],
+      [0.0, -18.0, 0.0],
+      [-17.5, -4.0, 1.4],
+      [17.5, 4.0, -1.4],
+      [-25.8, 0.0, 1.5],
+      [22.2, 0.0, -1.5],
+      [-17.5, 18.0, 0.8],
+      [17.5, -18.0, -0.8],
+      [-35.0, 6.0, 1.5],
+      [35.0, -6.0, -1.5],
     ],
   },
   5: {
-    worldRadius: 43.0,
-    seeker: [2.2, 2.5, 0],
+    worldRadius: 58.0,
+    seeker: [0.0, -5.5, 0.0],
     hiders: [
-      [-2.0, 7.5, Math.PI],
-      [-17.5, 4.5, 0.5],
-      [17.5, 4.5, -0.5],
-      [-2.0, -16.5, 2.8],
-      [-12.0, -6.4, 0.3],
-      [8.0, -6.4, -0.3],
-      [-18.0, 12.5, 1.0],
-      [18.0, 12.5, -1.0],
-      [0.0, 21.0, Math.PI],
-      [-18.0, 21.0, 2.0],
+      [0.0, -21.0, Math.PI],
+      [-24.0, -21.0, 1.57],
+      [24.0, -21.0, -1.57],
+      [-22.0, -5.5, 1.57],
+      [22.0, -5.5, -1.57],
+      [-19.5, 16.5, 0.5],
+      [19.5, 16.5, -0.5],
+      [0.0, 16.5, Math.PI],
+      [-19.5, 36.5, 0.8],
+      [19.5, 36.5, -0.8],
     ],
   },
   6: {
-    worldRadius: 42.5,
-    seeker: [3.2, 2.2, 0],
+    worldRadius: 56.5,
+    seeker: [0.0, 12.0, Math.PI],
     hiders: [
-      [-2.0, 7.5, Math.PI],
-      [-18.5, -6.5, 0.7],
-      [18.5, -6.5, -0.7],
-      [0.0, -18.5, 3.0],
-      [-8.0, -7.5, 0.5],
-      [8.0, -7.5, -0.5],
-      [-20.5, -14.0, 0.9],
-      [20.5, -14.0, -0.9],
-      [-20.5, 8.0, 1.6],
-      [20.5, 8.0, -1.6],
+      [0.0, 26.0, Math.PI],
+      [-10.5, 4.5, 1.4],
+      [10.5, 4.5, -1.4],
+      [-22.5, 14.5, 0.2],
+      [22.5, 14.5, -0.2],
+      [-22.5, -8.5, 0.8],
+      [22.5, -8.5, -0.8],
+      [-35.0, 6.0, 1.5],
+      [35.0, 6.0, -1.5],
+      [0.0, 42.0, Math.PI],
     ],
   },
   7: {
-    worldRadius: 43.0,
+    worldRadius: 56.5,
     seeker: [12.5, 0.0, -Math.PI / 2],
     hiders: [
       [-12.5, 7.6, Math.PI],
       [-12.5, -14.0, 0.5],
       [12.5, 14.0, -0.6],
       [12.5, -14.0, 2.5],
-      [-12.5, -18.0, 1.2],
-      [-12.5, 0.0, 1.5],
-      [-12.5, 18.0, 2.0],
-      [12.5, -18.0, -1.2],
-      [12.5, 18.0, -2.0],
-      [-26.5, -8.0, 1.0],
+      [-12.5, -36.0, 1.2],
+      [12.5, -36.0, -1.2],
+      [-12.5, 36.0, 2.0],
+      [12.5, 36.0, -2.0],
+      [-26.5, 0.0, 1.5],
+      [26.5, 0.0, -1.5],
     ],
   },
   8: {
@@ -228,6 +260,8 @@ const LEVEL_SERVER_SPAWNS: Record<number, LevelServerSpawns> = {
 interface ServerPlayer {
   id: string;
   reconnectToken: string;
+  authUid: string | null;
+  avatarId: string;
   ws: WebSocket | null;
   disconnectedAt: number | null;
   name: string;
@@ -243,8 +277,11 @@ interface ServerPlayer {
   rotY: number;
   moveSpeed: number;
   animState: CharacterAnimState;
+  expression?: FacialExpression;
   chatTimestamps: number[];
   lastEmoteAt: number;
+  lastSlapAt: number;
+  lastHandshakeAt: number;
   reportedTargetIds: Set<string>;
   seekCount: number;
   lastSeekRound: number;
@@ -267,6 +304,8 @@ interface ServerRoom {
   levelId: number;
   phase: OnlineRoomPhase;
   roundNumber: number;
+  activeMatchId: string | null;
+  matchStartedAt: number;
   seekerRotationIndex: number;
   lastSeekerId: string | null;
   timeRemaining: number;
@@ -289,6 +328,29 @@ interface SocketMeta {
 
 const rooms = new Map<string, ServerRoom>();
 const socketMeta = new WeakMap<WebSocket, SocketMeta>();
+
+function sanitizeAvatarId(raw: unknown, fallback = 'raju'): string {
+  if (typeof raw === 'string' && /^[a-z0-9_-]{1,32}$/.test(raw.trim())) {
+    return raw.trim();
+  }
+  return fallback;
+}
+
+function attachVerifiedAuthAsync(
+  player: ServerPlayer,
+  rawAuthToken: unknown,
+  rawAvatarId?: unknown,
+): void {
+  if (rawAvatarId !== undefined) {
+    player.avatarId = sanitizeAvatarId(rawAvatarId, player.avatarId);
+  }
+  if (typeof rawAuthToken !== 'string' || !rawAuthToken.trim()) return;
+  void verifyFirebaseIdToken(rawAuthToken).then((verified) => {
+    if (verified) {
+      player.authUid = verified.uid;
+    }
+  });
+}
 
 function sanitizeName(raw: unknown): string {
   if (typeof raw !== 'string') return 'Player';
@@ -473,6 +535,8 @@ function startOnlineMatch(room: ServerRoom): void {
   room.lastSeekerId = seekerId;
   room.seekerRotationIndex = (activeIds.indexOf(seekerId) + 1) % activeIds.length;
   room.roundNumber += 1;
+  room.activeMatchId = crypto.randomUUID();
+  room.matchStartedAt = Date.now();
   room.phase = 'playing';
   room.winner = null;
   room.timeRemaining = MATCH_DURATION_SECONDS;
@@ -529,6 +593,40 @@ function endOnlineMatch(room: ServerRoom, winner: MatchWinner, bannerMsg: string
   if (room.phase !== 'playing') return;
   room.phase = 'ended';
   room.winner = winner;
+
+  let leaderboardUpdated = false;
+  const elapsedMs = Date.now() - room.matchStartedAt;
+  if (
+    winner !== null &&
+    room.activeMatchId &&
+    room.players.size >= MIN_PLAYERS_TO_START &&
+    elapsedMs >= MIN_VERIFIED_ONLINE_MATCH_MS
+  ) {
+    const winningRole: TeamRole = winner === 'seekers' ? 'seeker' : 'hider';
+    const verifiedWinners: Array<{
+      uid: string;
+      username: string;
+      avatarId: string;
+    }> = [];
+    for (const p of room.players.values()) {
+      if (p.role === winningRole && p.authUid) {
+        verifiedWinners.push({
+          uid: p.authUid,
+          username: p.name,
+          avatarId: p.avatarId,
+        });
+      }
+    }
+    if (verifiedWinners.length > 0) {
+      leaderboardUpdated = verifiedLeaderboardStore.recordVerifiedOnlineMatchWin({
+        matchId: room.activeMatchId,
+        levelId: room.levelId,
+        winners: verifiedWinners,
+      });
+    }
+  }
+  room.activeMatchId = null;
+
   setRoomBanner(room, bannerMsg, 5000);
   broadcastRoomState(room);
   broadcastEvent(room, {
@@ -536,6 +634,7 @@ function endOnlineMatch(room: ServerRoom, winner: MatchWinner, bannerMsg: string
     eventKind: 'match_end',
     winner,
     message: bannerMsg,
+    leaderboardUpdated,
   });
 }
 
@@ -683,6 +782,7 @@ setInterval(() => {
           moveSpeed: p.moveSpeed,
           isHiding: p.isHiding,
           animState: p.animState,
+          expression: p.expression,
           liveStatus: p.liveStatus,
         }));
         broadcastEvent(room, { type: 'player_positions', positions });
@@ -731,6 +831,8 @@ function handleWsMessage(ws: WebSocket, rawData: string): void {
     const hostPlayer: ServerPlayer = {
       id: playerId,
       reconnectToken,
+      authUid: null,
+      avatarId: sanitizeAvatarId(msg.avatarId, customization.presetId),
       ws,
       disconnectedAt: null,
       name: customization.name,
@@ -746,12 +848,17 @@ function handleWsMessage(ws: WebSocket, rawData: string): void {
       rotY: 0,
       moveSpeed: 0,
       animState: 'idle',
+      expression: undefined,
       chatTimestamps: [],
       lastEmoteAt: 0,
+      lastSlapAt: 0,
+      lastHandshakeAt: 0,
       reportedTargetIds: new Set<string>(),
       seekCount: 0,
       lastSeekRound: 0,
     };
+
+    attachVerifiedAuthAsync(hostPlayer, msg.authToken, msg.avatarId);
 
     const room: ServerRoom = {
       code,
@@ -760,6 +867,8 @@ function handleWsMessage(ws: WebSocket, rawData: string): void {
       levelId: requestedLevel,
       phase: 'lobby',
       roundNumber: 0,
+      activeMatchId: null,
+      matchStartedAt: 0,
       seekerRotationIndex: 0,
       lastSeekerId: null,
       timeRemaining: MATCH_DURATION_SECONDS,
@@ -837,6 +946,8 @@ function handleWsMessage(ws: WebSocket, rawData: string): void {
     const player: ServerPlayer = {
       id: playerId,
       reconnectToken,
+      authUid: null,
+      avatarId: sanitizeAvatarId(msg.avatarId, customization.presetId),
       ws,
       disconnectedAt: null,
       name: customization.name,
@@ -852,12 +963,17 @@ function handleWsMessage(ws: WebSocket, rawData: string): void {
       rotY: 0,
       moveSpeed: 0,
       animState: 'idle',
+      expression: undefined,
       chatTimestamps: [],
       lastEmoteAt: 0,
+      lastSlapAt: 0,
+      lastHandshakeAt: 0,
       reportedTargetIds: new Set<string>(),
       seekCount: minExistingSeekCount,
       lastSeekRound: 0,
     };
+
+    attachVerifiedAuthAsync(player, msg.authToken, msg.avatarId);
 
     room.players.set(playerId, player);
     room.playerOrder.push(playerId);
@@ -924,10 +1040,18 @@ function handleWsMessage(ws: WebSocket, rawData: string): void {
     return;
   }
 
+  if (msg.type === 'identify_auth') {
+    attachVerifiedAuthAsync(player, msg.authToken, msg.avatarId);
+    return;
+  }
+
   if (msg.type === 'update_profile') {
     const nextCust = sanitizeCustomization(msg.customization);
     player.customization = nextCust;
     player.name = nextCust.name;
+    if (msg.avatarId !== undefined) {
+      player.avatarId = sanitizeAvatarId(msg.avatarId, player.avatarId);
+    }
     if (player.id === room.hostId && typeof msg.unlockedLevel === 'number') {
       room.hostUnlockedLevel = Math.max(
         room.hostUnlockedLevel,
@@ -1011,7 +1135,7 @@ function handleWsMessage(ws: WebSocket, rawData: string): void {
       player.x = Math.max(-maxR, Math.min(maxR, st.x));
     }
     if (typeof st.y === 'number' && Number.isFinite(st.y)) {
-      player.y = Math.max(0, Math.min(4.5, st.y));
+      player.y = Math.max(0, Math.min(9.5, st.y));
     }
     if (typeof st.z === 'number' && Number.isFinite(st.z)) {
       player.z = Math.max(-maxR, Math.min(maxR, st.z));
@@ -1027,6 +1151,11 @@ function handleWsMessage(ws: WebSocket, rawData: string): void {
     }
     if (ALLOWED_ANIM_STATES.has(st.animState)) {
       player.animState = st.animState;
+    }
+    if (st.expression && ALLOWED_EXPRESSIONS.has(st.expression)) {
+      player.expression = st.expression;
+    } else if (st.expression === undefined) {
+      player.expression = undefined;
     }
 
     const nextStatus = computeLiveStatus(room, player);
@@ -1108,6 +1237,124 @@ function handleWsMessage(ws: WebSocket, rawData: string): void {
     return;
   }
 
+  if (msg.type === 'try_slap_hider') {
+    if (room.phase !== 'playing') return;
+    if (player.role !== 'hider' || player.caught) return;
+
+    const now = Date.now();
+    if (now - player.lastSlapAt < HIDER_SLAP_COOLDOWN_MS) return;
+
+    let target: ServerPlayer | null = null;
+    if (typeof msg.targetPlayerId === 'string') {
+      const candidate = room.players.get(msg.targetPlayerId);
+      if (
+        candidate &&
+        candidate.id !== player.id &&
+        candidate.role === 'hider' &&
+        !candidate.caught
+      ) {
+        const d = Math.hypot(candidate.x - player.x, candidate.z - player.z);
+        if (d <= SERVER_SLAP_RANGE) {
+          target = candidate;
+        }
+      }
+    }
+    if (!target) {
+      let bestDist = SERVER_SLAP_RANGE;
+      for (const candidate of room.players.values()) {
+        if (
+          candidate.id === player.id ||
+          candidate.role !== 'hider' ||
+          candidate.caught
+        ) {
+          continue;
+        }
+        const d = Math.hypot(candidate.x - player.x, candidate.z - player.z);
+        if (d <= bestDist) {
+          bestDist = d;
+          target = candidate;
+        }
+      }
+    }
+
+    if (!target) return;
+
+    player.lastSlapAt = now;
+    player.animState = 'tag_lunge';
+    room.dirtyPositions = true;
+
+    broadcastEvent(room, {
+      type: 'match_event',
+      eventKind: 'hider_slap',
+      slapperPlayerId: player.id,
+      targetPlayerId: target.id,
+      message: `${player.name} playfully slapped ${target.name}!`,
+    });
+    return;
+  }
+
+  if (msg.type === 'try_handshake') {
+    if (room.phase !== 'playing') return;
+    if (player.caught) return;
+    if (player.role === 'seeker' && room.countdownTimer > 0) return;
+
+    const now = Date.now();
+    if (now - player.lastHandshakeAt < HANDSHAKE_COOLDOWN_MS) return;
+
+    // Friendly players only (same role, uncaught)
+    let target: ServerPlayer | null = null;
+    if (typeof msg.targetPlayerId === 'string') {
+      const candidate = room.players.get(msg.targetPlayerId);
+      if (
+        candidate &&
+        candidate.id !== player.id &&
+        candidate.role === player.role &&
+        !candidate.caught
+      ) {
+        const d = Math.hypot(candidate.x - player.x, candidate.z - player.z);
+        if (d <= SERVER_HANDSHAKE_RANGE) {
+          target = candidate;
+        }
+      }
+    }
+    if (!target) {
+      let bestDist = SERVER_HANDSHAKE_RANGE;
+      for (const candidate of room.players.values()) {
+        if (
+          candidate.id === player.id ||
+          candidate.role !== player.role ||
+          candidate.caught
+        ) {
+          continue;
+        }
+        const d = Math.hypot(candidate.x - player.x, candidate.z - player.z);
+        if (d <= bestDist) {
+          bestDist = d;
+          target = candidate;
+        }
+      }
+    }
+
+    if (!target) return;
+
+    player.lastHandshakeAt = now;
+    target.lastHandshakeAt = now;
+    player.animState = 'handshake';
+    target.animState = 'handshake';
+    player.expression = 'happy';
+    target.expression = 'happy';
+    room.dirtyPositions = true;
+
+    broadcastEvent(room, {
+      type: 'match_event',
+      eventKind: 'player_handshake',
+      actorPlayerId: player.id,
+      targetPlayerId: target.id,
+      message: `🤝 ${player.name} and ${target.name} shook hands!`,
+    });
+    return;
+  }
+
   if (msg.type === 'send_chat') {
     const now = Date.now();
     player.chatTimestamps = player.chatTimestamps.filter(
@@ -1130,6 +1377,9 @@ function handleWsMessage(ws: WebSocket, rawData: string): void {
 
     player.chatTimestamps.push(now);
 
+    const isSpectatorInLiveMatch =
+      room.phase === 'playing' && player.role === 'hider' && player.caught;
+
     const chatMessage: ChatMessagePayload = {
       id: crypto.randomUUID(),
       senderId: player.id,
@@ -1138,8 +1388,26 @@ function handleWsMessage(ws: WebSocket, rawData: string): void {
       text: filtered.text,
       kind: msg.isQuickChat ? 'quick' : 'text',
       wasFiltered: filtered.wasFiltered,
+      spectatorOnly: isSpectatorInLiveMatch || undefined,
       timestamp: now,
     };
+
+    if (isSpectatorInLiveMatch) {
+      // Fair-play isolation: spectator messages are ONLY delivered to other caught spectators,
+      // never to the seeker or active hiders, preventing hidden-player callouts.
+      for (const recipient of room.players.values()) {
+        if (
+          recipient.id === player.id ||
+          (recipient.role === 'hider' && recipient.caught)
+        ) {
+          sendJson(recipient.ws, {
+            type: 'chat_message',
+            chatMessage,
+          });
+        }
+      }
+      return;
+    }
 
     room.chatHistory.push(chatMessage);
     if (room.chatHistory.length > MAX_CHAT_HISTORY) {
@@ -1154,6 +1422,9 @@ function handleWsMessage(ws: WebSocket, rawData: string): void {
   }
 
   if (msg.type === 'send_emote') {
+    if (room.phase === 'playing' && player.role === 'hider' && player.caught) {
+      return;
+    }
     if (!msg.emote || !ALLOWED_EMOTES.has(msg.emote)) return;
     const now = Date.now();
     if (now - player.lastEmoteAt < EMOTE_COOLDOWN_MS) {
@@ -1258,8 +1529,120 @@ async function startServer(): Promise<void> {
   const app = express();
   const server = http.createServer(app);
 
+  app.use(express.json({ limit: '16kb' }));
+
   app.get('/api/health', (_req, res) => {
     res.json({ ok: true, rooms: rooms.size });
+  });
+
+  // Global Leaderboard (Daily / Weekly / All-Time Top 100 from server-verified wins)
+  app.get('/api/leaderboard', async (req, res) => {
+    const rawPeriod = typeof req.query.period === 'string' ? req.query.period : 'all_time';
+    const period: LeaderboardPeriod =
+      rawPeriod === 'daily' || rawPeriod === 'weekly' || rawPeriod === 'all_time'
+        ? rawPeriod
+        : 'all_time';
+
+    const bearer = extractBearerToken(req.headers.authorization);
+    const verifiedUser = bearer ? await verifyFirebaseIdToken(bearer) : null;
+
+    const snapshot = verifiedLeaderboardStore.getLeaderboardSnapshot(
+      period,
+      verifiedUser?.uid ?? null,
+    );
+    res.setHeader('Cache-Control', 'no-store');
+    res.json(snapshot);
+  });
+
+  // Start a single-use server-tracked solo match session (requires verified Firebase Auth)
+  app.post('/api/matches/start', async (req, res) => {
+    const bearer = extractBearerToken(req.headers.authorization);
+    const verifiedUser = await verifyFirebaseIdToken(bearer);
+    if (!verifiedUser) {
+      res.status(401).json({ error: 'Authentication required to record ranked matches.' });
+      return;
+    }
+
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<
+      string,
+      unknown
+    >;
+    const result = verifiedLeaderboardStore.startSoloMatchSession({
+      uid: verifiedUser.uid,
+      username: body.username ?? verifiedUser.name ?? 'Village Kid',
+      avatarId: body.avatarId ?? 'raju',
+      levelId: body.levelId,
+      playerRole: body.playerRole,
+    });
+
+    if ('error' in result) {
+      res.status(400).json({ error: result.error });
+      return;
+    }
+    res.status(201).json(result);
+  });
+
+  // Finalize a server-tracked solo match session (rejects arbitrary/fake score submissions)
+  app.post('/api/matches/complete', async (req, res) => {
+    const bearer = extractBearerToken(req.headers.authorization);
+    const verifiedUser = await verifyFirebaseIdToken(bearer);
+    if (!verifiedUser) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<
+      string,
+      unknown
+    >;
+    const result = verifiedLeaderboardStore.completeSoloMatchSession({
+      sessionId: body.sessionId,
+      uid: verifiedUser.uid,
+      outcome: body.outcome,
+      remainingHiders: body.remainingHiders,
+      caughtCount: body.caughtCount,
+      username: body.username,
+      avatarId: body.avatarId,
+    });
+
+    if (!result.verified) {
+      res.status(400).json(result);
+      return;
+    }
+    res.json(result);
+  });
+
+  // Update only display username & village avatar on existing verified leaderboard records
+  app.post('/api/leaderboard/identity', async (req, res) => {
+    const bearer = extractBearerToken(req.headers.authorization);
+    const verifiedUser = await verifyFirebaseIdToken(bearer);
+    if (!verifiedUser) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+
+    const body = (req.body && typeof req.body === 'object' ? req.body : {}) as Record<
+      string,
+      unknown
+    >;
+    verifiedLeaderboardStore.updatePlayerIdentity(
+      verifiedUser.uid,
+      body.username,
+      body.avatarId,
+    );
+    res.json({ ok: true });
+  });
+
+  // Remove player's leaderboard records upon verified account deletion
+  app.delete('/api/leaderboard/me', async (req, res) => {
+    const bearer = extractBearerToken(req.headers.authorization);
+    const verifiedUser = await verifyFirebaseIdToken(bearer);
+    if (!verifiedUser) {
+      res.status(401).json({ error: 'Authentication required.' });
+      return;
+    }
+    verifiedLeaderboardStore.removePlayer(verifiedUser.uid);
+    res.json({ ok: true });
   });
 
   // Dedicated WebSocket server exclusively for /ws/multiplayer

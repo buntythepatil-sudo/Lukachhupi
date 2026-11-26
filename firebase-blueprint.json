@@ -685,6 +685,114 @@
         "createdAt",
         "updatedAt"
       ]
+    },
+    "LeaderboardEntry": {
+      "title": "Global Leaderboard Entry",
+      "description": "Server-verified global ranking record for daily, weekly, and all-time win leaderboards. Strictly read-only to clients.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Firebase Auth UID of the ranked player."
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20,
+          "description": "Player display username."
+        },
+        "avatarId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^[a-z0-9_\\-]+$",
+          "description": "Selected village avatar identifier."
+        },
+        "periodId": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 32,
+          "pattern": "^(all_time|daily_[0-9]{4}-[0-9]{2}-[0-9]{2}|weekly_[0-9]{4}-W[0-9]{2})$",
+          "description": "Leaderboard time window key (all_time, daily_YYYY-MM-DD, or weekly_YYYY-Www)."
+        },
+        "wins": {
+          "type": "integer",
+          "description": "Total server-verified match wins within this period."
+        },
+        "completedLevels": {
+          "type": "array",
+          "description": "List of completed map IDs (integers 1 through 8)."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timestamp of the latest verified win."
+        }
+      },
+      "required": [
+        "uid",
+        "username",
+        "avatarId",
+        "periodId",
+        "wins",
+        "completedLevels",
+        "updatedAt"
+      ]
+    },
+    "VerifiedMatchRecord": {
+      "title": "Verified Match Result",
+      "description": "Server-verified match record proving legitimate win attribution. Strictly read-only to clients.",
+      "type": "object",
+      "properties": {
+        "matchId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Unique verified match identifier."
+        },
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "Owner Firebase Auth UID."
+        },
+        "levelId": {
+          "type": "integer",
+          "description": "Map level ID from 1 to 8."
+        },
+        "playerRole": {
+          "type": "string",
+          "enum": ["hider", "seeker"],
+          "description": "Role played in the match."
+        },
+        "playerWon": {
+          "type": "boolean",
+          "description": "Whether the player won this verified match."
+        },
+        "isOnline": {
+          "type": "boolean",
+          "description": "Whether this match was played in online multiplayer."
+        },
+        "verifiedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when match was verified."
+        }
+      },
+      "required": [
+        "matchId",
+        "uid",
+        "levelId",
+        "playerRole",
+        "playerWon",
+        "isOnline",
+        "verifiedAt"
+      ]
     }
   },
   "firestore": {
@@ -759,6 +867,18 @@
         "$ref": "#/entities/PlayerReport"
       },
       "description": "Immutable player safety reports readable only by their submitting reporter."
+    },
+    "/leaderboards/{periodId}/entries/{userId}": {
+      "schema": {
+        "$ref": "#/entities/LeaderboardEntry"
+      },
+      "description": "Server-verified global leaderboard entries (daily, weekly, all-time). Strictly read-only to clients (max 100 per query)."
+    },
+    "/verifiedMatches/{matchId}": {
+      "schema": {
+        "$ref": "#/entities/VerifiedMatchRecord"
+      },
+      "description": "Server-verified match results readable only by their participant owner; strictly read-only to clients."
     }
   }
 }

@@ -16,6 +16,12 @@ export const CAMERA_DEFAULT_ZOOM_SPEED = 1.0;
 const MIN_PITCH = -0.22; // Look up toward rooftops, banyan canopy, and sky
 const MAX_PITCH = 1.18; // Look down from a high courtyard overview
 const DEFAULT_PITCH = 0.44;
+const FREE_MIN_PITCH = -0.72;
+const FREE_MAX_PITCH = 1.32;
+const FREE_MIN_Y = 1.45;
+const FREE_MAX_Y = 26.0;
+const FREE_HORIZONTAL_SPEED = 12.5;
+const FREE_VERTICAL_SPEED = 8.5;
 
 const MIN_GROUND_Y = 0.44;
 const WALL_BUFFER = 0.38;
@@ -37,6 +43,9 @@ const _rightVec = new THREE.Vector3();
 const _upVec = new THREE.Vector3(0, 1, 0);
 const _candCamPos = new THREE.Vector3();
 const _lookTarget = new THREE.Vector3();
+const _freeForward = new THREE.Vector3();
+const _freeRight = new THREE.Vector3();
+const _freeDesiredVel = new THREE.Vector3();
 const _raycaster = new THREE.Raycaster();
 const _hitBuffer: THREE.Intersection[] = [];
 
@@ -73,6 +82,13 @@ export interface CameraFollowTarget {
   rightInput?: number;
 }
 
+export interface FreeCameraInput {
+  forward: number;
+  right: number;
+  vertical: number;
+  worldRadius: number;
+}
+
 export class ThirdPersonCameraController {
   private domElement: HTMLElement;
   private occluders: THREE.Mesh[] = [];
@@ -80,6 +96,8 @@ export class ThirdPersonCameraController {
   private onSettingsChanged?: (settings: CameraSettings) => void;
 
   private enabled = false;
+  private freeMode = false;
+  private fullScreenTouchLook = false;
   private settings: CameraSettings = createDefaultCameraSettings();
 
   // Target & smoothly damped spherical orbit parameters
@@ -94,6 +112,11 @@ export class ThirdPersonCameraController {
   private smoothedPivot = new THREE.Vector3(0, 1.25, 0);
   private smoothedLook = new THREE.Vector3(0, 1.25, 0);
   private initializedPivot = false;
+
+  // Spectator Free Camera state
+  private freePosition = new THREE.Vector3(0, 8, 12);
+  private freeVelocity = new THREE.Vector3();
+  private freeDollyImpulse = 0;
 
   // Cooldown & recenter state
   private manualCooldown = 0;
@@ -130,11 +153,166 @@ export class ThirdPersonCameraController {
     if (this.enabled === enabled) return;
     this.enabled = enabled;
     if (!enabled) {
+      this.freeMode = false;
+      this.fullScreenTouchLook = false;
+      this.freeVelocity.set(0, 0, 0);
+      this.freeDollyImpulse = 0;
       this.resetPointerState();
       this.domElement.style.cursor = 'default';
     } else {
       this.domElement.style.cursor = 'grab';
     }
+  }
+
+  public setFullScreenTouchLook(enabled: boolean): void {
+    this.fullScreenTouchLook = enabled;
+  }
+
+  public enterFreeCamera(
+    camera: THREE.PerspectiveCamera,
+    worldRadius: number,
+  ): void {
+    this.freeMode = true;
+    this.freeVelocity.set(0, 0, 0);
+    this.freeDollyImpulse = 0;
+    this.recentering = false;
+    this.manualCooldown = 0;
+
+    this.freePosition.copy(camera.position);
+    this.freePosition.y = THREE.MathUtils.clamp(
+      Math.max(this.freePosition.y, 2.8),
+      FREE_MIN_Y,
+      FREE_MAX_Y,
+    );
+    const maxR = Math.max(10, worldRadius + 4);
+    const r = Math.hypot(this.freePosition.x, this.freePosition.z);
+    if (r > maxR) {
+      this.freePosition.x = (this.freePosition.x / r) * maxR;
+      this.freePosition.z = (this.freePosition.z / r) * maxR;
+    }
+
+    this.targetPitch = THREE.MathUtils.clamp(
+      this.currentPitch,
+      FREE_MIN_PITCH,
+      FREE_MAX_PITCH,
+    );
+    this.currentPitch = this.targetPitch;
+    this.targetYaw = this.currentYaw;
+  }
+
+  public exitFreeCamera(): void {
+    if (!this.freeMode) return;
+    this.freeMode = false;
+    this.freeVelocity.set(0, 0, 0);
+    this.freeDollyImpulse = 0;
+    this.targetPitch = THREE.MathUtils.clamp(
+      this.targetPitch,
+      MIN_PITCH,
+      MAX_PITCH,
+    );
+    this.currentPitch = THREE.MathUtils.clamp(
+      this.currentPitch,
+      MIN_PITCH,
+      MAX_PITCH,
+    );
+  }
+
+  public isFreeCameraActive(): boolean {
+    return this.freeMode;
+  }
+
+  public getFreeCameraPosition(out: THREE.Vector3): THREE.Vector3 {
+    return out.copy(this.freePosition);
+  }
+
+  public updateFreeCamera(
+    camera: THREE.PerspectiveCamera,
+    input: FreeCameraInput,
+    dt: number,
+  ): void {
+    const yawStep = wrapAngleDelta(this.targetYaw - this.currentYaw);
+    this.currentYaw += yawStep * (1 - Math.exp(-15 * dt));
+    this.currentPitch = THREE.MathUtils.damp(
+      this.currentPitch,
+      this.targetPitch,
+      15,
+      dt,
+    );
+
+    const cosPitch = Math.cos(this.currentPitch);
+    const sinPitch = Math.sin(this.currentPitch);
+    const sinYaw = Math.sin(this.currentYaw);
+    const cosYaw = Math.cos(this.currentYaw);
+
+    // Horizontal forward/right basis aligned with camera view
+    _freeForward.set(-sinYaw, 0, -cosYaw).normalize();
+    _freeRight.set(cosYaw, 0, -sinYaw).normalize();
+
+    const horizMag = Math.hypot(input.forward, input.right);
+    const normFwd = horizMag > 1 ? input.forward / horizMag : input.forward;
+    const normRgt = horizMag > 1 ? input.right / horizMag : input.right;
+
+    _freeDesiredVel.set(
+      (_freeForward.x * normFwd + _freeRight.x * normRgt) * FREE_HORIZONTAL_SPEED,
+      THREE.MathUtils.clamp(input.vertical, -1, 1) * FREE_VERTICAL_SPEED,
+      (_freeForward.z * normFwd + _freeRight.z * normRgt) * FREE_HORIZONTAL_SPEED,
+    );
+
+    if (Math.abs(this.freeDollyImpulse) > 0.01) {
+      const dollyDirX = -sinYaw * cosPitch;
+      const dollyDirY = -sinPitch;
+      const dollyDirZ = -cosYaw * cosPitch;
+      _freeDesiredVel.x += dollyDirX * this.freeDollyImpulse;
+      _freeDesiredVel.y += dollyDirY * this.freeDollyImpulse;
+      _freeDesiredVel.z += dollyDirZ * this.freeDollyImpulse;
+      this.freeDollyImpulse *= Math.exp(-10 * dt);
+    } else {
+      this.freeDollyImpulse = 0;
+    }
+
+    this.freeVelocity.x = THREE.MathUtils.damp(
+      this.freeVelocity.x,
+      _freeDesiredVel.x,
+      9.5,
+      dt,
+    );
+    this.freeVelocity.y = THREE.MathUtils.damp(
+      this.freeVelocity.y,
+      _freeDesiredVel.y,
+      9.5,
+      dt,
+    );
+    this.freeVelocity.z = THREE.MathUtils.damp(
+      this.freeVelocity.z,
+      _freeDesiredVel.z,
+      9.5,
+      dt,
+    );
+
+    this.freePosition.addScaledVector(this.freeVelocity, dt);
+    this.freePosition.y = THREE.MathUtils.clamp(
+      this.freePosition.y,
+      FREE_MIN_Y,
+      FREE_MAX_Y,
+    );
+
+    const maxR = Math.max(10, input.worldRadius + 4);
+    const r = Math.hypot(this.freePosition.x, this.freePosition.z);
+    if (r > maxR) {
+      this.freePosition.x = (this.freePosition.x / r) * maxR;
+      this.freePosition.z = (this.freePosition.z / r) * maxR;
+    }
+
+    // Prevent free camera from clipping inside ground-floor solid walls
+    this.keepCameraOutsideSolidWalls(this.freePosition);
+
+    camera.position.copy(this.freePosition);
+    _lookTarget.set(
+      this.freePosition.x - sinYaw * cosPitch * 8,
+      this.freePosition.y - sinPitch * 8,
+      this.freePosition.z - cosYaw * cosPitch * 8,
+    );
+    camera.lookAt(_lookTarget);
   }
 
   public getSettings(): CameraSettings {
@@ -577,6 +755,14 @@ export class ThirdPersonCameraController {
   }
 
   private adjustZoom(delta: number): void {
+    if (this.freeMode) {
+      this.freeDollyImpulse = THREE.MathUtils.clamp(
+        this.freeDollyImpulse - delta * 6.5,
+        -22,
+        22,
+      );
+      return;
+    }
     const next = THREE.MathUtils.clamp(
       this.targetZoom + delta,
       CAMERA_MIN_ZOOM,
@@ -599,11 +785,13 @@ export class ThirdPersonCameraController {
     pitchScale: number,
   ): void {
     const sens = this.settings.sensitivity;
+    const minPitch = this.freeMode ? FREE_MIN_PITCH : MIN_PITCH;
+    const maxPitch = this.freeMode ? FREE_MAX_PITCH : MAX_PITCH;
     this.targetYaw -= dx * yawScale * sens;
     this.targetPitch = THREE.MathUtils.clamp(
       this.targetPitch + dy * pitchScale * sens,
-      MIN_PITCH,
-      MAX_PITCH,
+      minPitch,
+      maxPitch,
     );
     this.manualCooldown = MANUAL_FOLLOW_COOLDOWN;
     this.recentering = false;
@@ -623,7 +811,8 @@ export class ThirdPersonCameraController {
 
     if (e.pointerType === 'touch') {
       const rect = this.domElement.getBoundingClientRect();
-      const startedRightSide = e.clientX >= rect.left + rect.width * 0.5;
+      const startedRightSide =
+        this.fullScreenTouchLook || e.clientX >= rect.left + rect.width * 0.5;
 
       this.activeTouches.set(e.pointerId, {
         x: e.clientX,
@@ -638,7 +827,7 @@ export class ThirdPersonCameraController {
       }
 
       if (this.activeTouches.size === 1) {
-        // Single-finger mobile rotation activates on the right half of the screen
+        // Single-finger mobile rotation activates on the right half (or full screen in follow spectator mode)
         if (startedRightSide) {
           this.touchLookId = e.pointerId;
         }

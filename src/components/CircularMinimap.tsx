@@ -4,6 +4,7 @@ import { MinimapFrame, TeamRole } from '../game/types';
 interface CircularMinimapProps {
   registerListener: (cb: ((frame: MinimapFrame) => void) | null) => void;
   playerRole: TeamRole;
+  isSpectating?: boolean;
 }
 
 const RADAR_VIEW_RADIUS_WORLD = 36; // World meters visible from center to rim
@@ -11,6 +12,7 @@ const RADAR_VIEW_RADIUS_WORLD = 36; // World meters visible from center to rim
 export function CircularMinimap({
   registerListener,
   playerRole,
+  isSpectating = false,
 }: CircularMinimapProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -365,12 +367,22 @@ export function CircularMinimap({
         <span className="inline-flex items-center gap-1">
           <span
             aria-hidden="true"
-            className="inline-block w-2 h-2 rounded-full bg-[#fff8e7] border border-[#1d140e]"
+            className={`inline-block w-2 h-2 rounded-full border border-[#1d140e] ${
+              isSpectating ? 'bg-[#93c5fd]' : 'bg-[#fff8e7]'
+            }`}
           />
-          You
+          {isSpectating ? 'Cam' : 'You'}
         </span>
         <span aria-hidden="true">·</span>
-        {playerRole === 'hider' ? (
+        {isSpectating ? (
+          <span className="inline-flex items-center gap-1">
+            <span
+              aria-hidden="true"
+              className="inline-block w-2 h-2 rounded-full bg-[#ff6b4a]"
+            />
+            Seeker
+          </span>
+        ) : playerRole === 'hider' ? (
           <>
             <span className="inline-flex items-center gap-1">
               <span

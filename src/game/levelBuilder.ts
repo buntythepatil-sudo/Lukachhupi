@@ -1,14 +1,10 @@
-import {
-  buildMangoFarmMap,
-  buildOldMarketMap,
-  buildRailwayColonyMap,
-  buildSchoolCampusMap,
-} from './mapsPart1';
-import {
-  buildFestivalVillageMap,
-  buildHauntedHaveliMap,
-  buildRiverVillageMap,
-} from './mapsPart2';
+import { buildSchoolCampusMap } from './mapsPart1';
+import { buildMangoFarmMap } from './mangoFarmMap';
+import { buildOldMarketMap } from './oldMarketMap';
+import { buildRailwayColonyMap } from './railwayColonyMap';
+import { buildHauntedHaveliMap } from './hauntedHaveliMap';
+import { buildRiverVillageMap } from './riverVillageMap';
+import { buildFestivalVillageMap } from './mapsPart2';
 import { VillageTextureSet } from './textures';
 import { buildIndianVillage, VillageBuildResult } from './village';
 

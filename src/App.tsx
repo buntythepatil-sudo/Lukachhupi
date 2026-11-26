@@ -7,6 +7,8 @@ import {
 import { Timestamp } from 'firebase/firestore';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
+  Armchair,
+  ArrowDown,
   ArrowLeft,
   ArrowUp,
   BarChart3,
@@ -19,9 +21,11 @@ import {
   Compass,
   Copy,
   Crown,
+  Eye,
   EyeOff,
   Flag,
   Hand,
+  Handshake,
   Link2,
   Lock,
   LogOut,
@@ -37,15 +41,18 @@ import {
   SlidersHorizontal,
   Smile,
   Star,
+  Trophy,
   User,
   UserPlus,
   Users,
+  Video,
   Volume2,
   VolumeX,
   X,
 } from 'lucide-react';
 import { CircularMinimap } from './components/CircularMinimap';
 import { FriendsPanel } from './components/FriendsPanel';
+import { LeaderboardPanel } from './components/LeaderboardPanel';
 import {
   PlayerProfilePanel,
   ProfileSyncState,
@@ -144,6 +151,13 @@ import {
   subscribeToCloudProfile,
 } from './game/playerProfile';
 import {
+  completeVerifiedSoloMatch,
+  getVerifiedAuthToken,
+  removeLeaderboardAccountData,
+  startVerifiedSoloMatch,
+  syncLeaderboardIdentity,
+} from './game/leaderboardService';
+import {
   createDefaultPrivacySettings,
   deleteUserAccountAndData,
   fetchCloudPrivacySettings,
@@ -201,11 +215,27 @@ const INITIAL_HUD: HudSnapshot = {
   countdownSeconds: 12,
   isHiding: false,
   playerCaught: false,
+  isExploringSchool: false,
+  isSpectating: false,
+  spectatingTargetId: null,
   spectatingName: null,
   spectatingRole: null,
   spectatingCanCycle: false,
+  spectateCameraMode: 'follow',
+  spectateTargets: [],
   canTag: false,
   tagTargetName: null,
+  canSlapHider: false,
+  slapTargetName: null,
+  canSlapNpc: false,
+  slapNpcLabel: null,
+  canRingTempleBell: false,
+  templeBellLabel: null,
+  canHandshake: false,
+  handshakeTargetName: null,
+  canSit: false,
+  isSitting: false,
+  seatLabel: null,
   nearestDistance: 12,
   seekerMode: 'counting',
   hidingSpotLabel: null,
@@ -274,6 +304,7 @@ export default function App() {
   const [showCameraSettings, setShowCameraSettings] = useState(false);
   const [showAudioSettings, setShowAudioSettings] = useState(false);
   const [showOnlineRoster, setShowOnlineRoster] = useState(true);
+  const [showSpectatorPicker, setShowSpectatorPicker] = useState(false);
   const [startScreen, setStartScreen] = useState<
     | 'menu'
     | 'levels'
@@ -283,11 +314,14 @@ export default function App() {
     | 'profile'
     | 'friends'
     | 'privacy'
+    | 'leaderboard'
   >('menu');
   const [privacyReturnScreen, setPrivacyReturnScreen] = useState<
     'menu' | 'settings' | 'friends'
   >('settings');
   const [showQuitModal, setShowQuitModal] = useState(false);
+  const [leaderboardRefreshToken, setLeaderboardRefreshToken] = useState(0);
+  const activeSoloSessionIdRef = useRef<string | null>(null);
 
   // Player Profile, Statistics & Cross-Device Firebase Sync state
   const [playerProfile, setPlayerProfile] =
@@ -778,7 +812,17 @@ export default function App() {
     pushSafetyNotice,
   ]);
 
-  // Record ended match outcome once per matchId into local & cloud profile
+  // Attach verified Firebase Auth token to an active online room whenever sign-in state changes
+  useEffect(() => {
+    if (!firebaseUser || !onlineRoom?.code) return;
+    void getVerifiedAuthToken().then((token) => {
+      if (token) {
+        mpClientRef.current?.identifyAuth(token, profileRef.current.avatarId);
+      }
+    });
+  }, [firebaseUser, onlineRoom?.code]);
+
+  // Record ended match outcome once per matchId into local, cloud profile & verified leaderboard
   useEffect(() => {
     const result = hud.matchResult;
     if (!result || result.matchId <= 0) return;
@@ -793,6 +837,27 @@ export default function App() {
     applyResolvedProfile(nextProfile);
 
     const activeUser = auth.currentUser;
+    if (!result.isOnline) {
+      const sessionId = activeSoloSessionIdRef.current;
+      activeSoloSessionIdRef.current = null;
+      if (activeUser && sessionId) {
+        void completeVerifiedSoloMatch({
+          sessionId,
+          outcome: result.playerWon ? 'win' : 'loss',
+          remainingHiders: result.remainingHiders,
+          caughtCount: result.caughtCount,
+          username: nextProfile.username,
+          avatarId: nextProfile.avatarId,
+        }).then((res) => {
+          if (res.credited) {
+            setLeaderboardRefreshToken((n) => n + 1);
+          }
+        });
+      }
+    } else if (result.playerWon) {
+      setLeaderboardRefreshToken((n) => n + 1);
+    }
+
     if (activeUser) {
       setSyncState('syncing');
       void saveCloudProfile(
@@ -892,6 +957,9 @@ export default function App() {
       },
       onMatchEvent: (event) => {
         engine.handleOnlineMatchEvent(event);
+        if (event.eventKind === 'match_end' && event.leaderboardUpdated) {
+          setLeaderboardRefreshToken((n) => n + 1);
+        }
       },
       onChatHistory: (messages) => {
         setChatMessages(messages.slice(-50));
@@ -944,13 +1012,15 @@ export default function App() {
     engine.setOnlineCallbacks(
       (state) => mpClient.sendPlayerState(state),
       (targetId) => mpClient.sendTagAttempt(targetId),
+      (targetId) => mpClient.sendHiderSlap(targetId),
+      (targetId) => mpClient.sendHandshake(targetId),
     );
 
     return () => {
       if (safetyTimerRef.current !== null) {
         window.clearTimeout(safetyTimerRef.current);
       }
-      engine.setOnlineCallbacks(null, null);
+      engine.setOnlineCallbacks(null, null, null, null);
       mpClient.dispose();
       mpClientRef.current = null;
       engine.dispose();
@@ -967,7 +1037,11 @@ export default function App() {
   useEffect(() => {
     if (!onlineRoom || onlineRoom.phase !== 'lobby') return;
     const timer = window.setTimeout(() => {
-      mpClientRef.current?.updateProfile(customization, hud.unlockedLevel);
+      mpClientRef.current?.updateProfile(
+        customization,
+        hud.unlockedLevel,
+        profileRef.current.avatarId,
+      );
     }, 180);
     return () => window.clearTimeout(timer);
   }, [customization, hud.unlockedLevel, onlineRoom?.code, onlineRoom?.phase]);
@@ -1025,6 +1099,9 @@ export default function App() {
     const activeUser = auth.currentUser;
     if (activeUser) {
       setSyncState('syncing');
+      void syncLeaderboardIdentity(cleaned, avatarId).then(() => {
+        setLeaderboardRefreshToken((n) => n + 1);
+      });
       void saveCloudProfileIdentity(
         activeUser.uid,
         cleaned,
@@ -1167,7 +1244,9 @@ export default function App() {
     if (!user) return;
     setAuthBusy(true);
     try {
+      await removeLeaderboardAccountData();
       await deleteUserAccountAndData(user);
+      setLeaderboardRefreshToken((n) => n + 1);
       const freshProfile = createDefaultPlayerProfile();
       const freshPrivacy = createDefaultPrivacySettings();
       cloudCreatedAtRef.current = undefined;
@@ -1314,7 +1393,14 @@ export default function App() {
       engineRef.current?.returnToStart();
     }
     setStartScreen('online');
-    mpClientRef.current?.joinRoom(invite.roomCode, customization);
+    void getVerifiedAuthToken().then((authToken) => {
+      mpClientRef.current?.joinRoom(
+        invite.roomCode,
+        customization,
+        authToken,
+        profileRef.current.avatarId,
+      );
+    });
   };
 
   const handleDismissRoomInvite = (invite: RoomInviteRecord) => {
@@ -1325,17 +1411,51 @@ export default function App() {
     engineRef.current?.selectLevel(levelId);
   };
 
+  const beginVerifiedSoloSession = (levelId: number, role: TeamRole) => {
+    activeSoloSessionIdRef.current = null;
+    if (!auth.currentUser) return;
+    const p = profileRef.current;
+    void startVerifiedSoloMatch({
+      username: p.username,
+      avatarId: p.avatarId,
+      levelId,
+      playerRole: role,
+    }).then((sessionId) => {
+      activeSoloSessionIdRef.current = sessionId;
+    });
+  };
+
   const handleStartMatch = () => {
     setShowScoreboard(false);
     setShowCameraSettings(false);
     setShowAudioSettings(false);
+    beginVerifiedSoloSession(hud.currentLevelId, chosenRole);
     engineRef.current?.startMatch(chosenRole, customization);
+  };
+
+  const handleExploreSchool = () => {
+    activeSoloSessionIdRef.current = null;
+    setShowScoreboard(false);
+    setShowCameraSettings(false);
+    setShowAudioSettings(false);
+    setStartScreen('menu');
+    engineRef.current?.startExploreSchool(customization);
+  };
+
+  const handleExitExplore = () => {
+    activeSoloSessionIdRef.current = null;
+    setShowScoreboard(false);
+    setShowCameraSettings(false);
+    setShowAudioSettings(false);
+    setStartScreen('menu');
+    engineRef.current?.exitExploreMode();
   };
 
   const handleRestart = () => {
     setShowScoreboard(false);
     setShowCameraSettings(false);
     setShowAudioSettings(false);
+    beginVerifiedSoloSession(hud.currentLevelId, hud.playerRole);
     engineRef.current?.restartMatch();
   };
 
@@ -1345,6 +1465,7 @@ export default function App() {
     setShowScoreboard(false);
     setShowCameraSettings(false);
     setShowAudioSettings(false);
+    beginVerifiedSoloSession(hud.currentLevelId, nextRole);
     engineRef.current?.startMatch(nextRole, customization);
   };
 
@@ -1352,10 +1473,13 @@ export default function App() {
     setShowScoreboard(false);
     setShowCameraSettings(false);
     setShowAudioSettings(false);
+    const nextLevelId = Math.min(TOTAL_LEVELS, hud.currentLevelId + 1);
+    beginVerifiedSoloSession(nextLevelId, hud.playerRole);
     engineRef.current?.advanceToNextLevel();
   };
 
   const handleSwitchTeam = () => {
+    activeSoloSessionIdRef.current = null;
     setShowScoreboard(false);
     setShowCameraSettings(false);
     setShowAudioSettings(false);
@@ -1372,7 +1496,8 @@ export default function App() {
       | 'settings'
       | 'profile'
       | 'friends'
-      | 'privacy',
+      | 'privacy'
+      | 'leaderboard',
   ) => {
     engineRef.current?.playUiClick();
     if (section === 'privacy') {
@@ -1421,6 +1546,26 @@ export default function App() {
     engineRef.current?.tryTag();
   };
 
+  const handleSlapHider = () => {
+    engineRef.current?.trySlapHider();
+  };
+
+  const handleSlapNpc = () => {
+    engineRef.current?.trySlapNpc();
+  };
+
+  const handleRingTempleBell = () => {
+    engineRef.current?.tryRingTempleBell();
+  };
+
+  const handleHandshake = () => {
+    engineRef.current?.tryHandshake();
+  };
+
+  const handleToggleSit = () => {
+    engineRef.current?.tryToggleSit();
+  };
+
   const handleTouchMove = (x: number, y: number) => {
     engineRef.current?.setTouchInput(x, y);
   };
@@ -1458,11 +1603,16 @@ export default function App() {
 
   const handleCreateRoom = () => {
     setRoomError(null);
-    mpClientRef.current?.createRoom(
-      customization,
-      hud.unlockedLevel,
-      Math.min(hud.currentLevelId, hud.unlockedLevel),
-    );
+    const levelToUse = Math.min(hud.currentLevelId, hud.unlockedLevel);
+    void getVerifiedAuthToken().then((authToken) => {
+      mpClientRef.current?.createRoom(
+        customization,
+        hud.unlockedLevel,
+        levelToUse,
+        authToken,
+        profileRef.current.avatarId,
+      );
+    });
   };
 
   const handleJoinRoom = (e?: React.FormEvent) => {
@@ -1473,7 +1623,14 @@ export default function App() {
       return;
     }
     setRoomError(null);
-    mpClientRef.current?.joinRoom(cleaned, customization);
+    void getVerifiedAuthToken().then((authToken) => {
+      mpClientRef.current?.joinRoom(
+        cleaned,
+        customization,
+        authToken,
+        profileRef.current.avatarId,
+      );
+    });
   };
 
   const handleHostSelectMap = (levelId: number) => {
@@ -1533,10 +1690,23 @@ export default function App() {
   };
 
   const handleSendEmote = (emote: EmoteType) => {
-    if (!onlineRoom || !localOnlinePlayerId) return;
-    mpClientRef.current?.sendEmote(emote);
+    if (hud.phase === 'playing' && hud.playerCaught) return;
+    if (onlineRoom && localOnlinePlayerId) {
+      mpClientRef.current?.sendEmote(emote);
+    } else {
+      const def = getEmoteDefinition(emote);
+      engineRef.current?.triggerLocalEmote(emote, def.bubbleText);
+    }
     setShowEmotePicker(false);
   };
+
+  useEffect(() => {
+    if (hud.phase !== 'playing' || !hud.playerCaught) {
+      setShowSpectatorPicker(false);
+    } else {
+      setShowEmotePicker(false);
+    }
+  }, [hud.phase, hud.playerCaught]);
 
   const handleToggleMutePlayer = (playerId: string, playerName: string) => {
     if (playerId === localOnlinePlayerId) return;
@@ -1641,51 +1811,72 @@ export default function App() {
               <CircularMinimap
                 registerListener={registerMinimapListener}
                 playerRole={hud.playerRole}
+                isSpectating={hud.isSpectating}
               />
             )}
 
             <div className="pointer-events-auto relative flex flex-col sm:flex-row items-start sm:items-center gap-1 sm:gap-2">
-              <button
-                type="button"
-                onClick={() => {
-                  setShowScoreboard((prev) => !prev);
-                  setShowCameraSettings(false);
-                  setShowAudioSettings(false);
-                }}
-                onPointerDown={(e) => e.stopPropagation()}
-                aria-expanded={showScoreboard}
-                aria-label="Match timer and scoreboard"
-                title="Click to view remaining and caught players"
-                className={`inline-flex items-center gap-1 sm:gap-1.5 min-h-[28px] sm:min-h-[42px] rounded-lg border px-1.5 sm:px-3 py-0.5 sm:py-2 font-mono text-[11px] sm:text-base font-bold tabular-nums transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-400 ${
-                  showScoreboard
-                    ? 'bg-amber-500 text-[#1d140e] border-amber-200'
-                    : hud.countdownSeconds === 0 && hud.timeRemaining <= 15
-                      ? 'bg-rose-950/92 hover:bg-rose-900 text-rose-100 border-rose-400/70'
-                      : 'bg-[#1d140e]/85 hover:bg-[#2c1f16] text-amber-300 border-amber-100/20'
-                }`}
-              >
-                <Clock className="w-3 h-3 sm:w-4 sm:h-4 shrink-0" aria-hidden="true" />
-                <span>{formatClock(hud.timeRemaining)}</span>
-              </button>
+              {hud.isExploringSchool ? (
+                <>
+                  <div className="inline-flex items-center gap-1.5 min-h-[28px] sm:min-h-[40px] rounded-lg border border-amber-300/40 bg-[#1d140e]/90 px-2 sm:px-3 py-1 text-[10px] sm:text-xs font-bold tracking-wide text-amber-200 whitespace-nowrap shrink-0">
+                    <Compass className="w-3.5 h-3.5 text-amber-300 shrink-0" aria-hidden="true" />
+                    <span>1995 SCHOOL · EXPLORE</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleExitExplore}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    className="inline-flex items-center gap-1 min-h-[28px] sm:min-h-[40px] rounded-lg border border-amber-200/35 bg-[#322117]/95 hover:bg-[#452c1d] px-2.5 sm:px-3 py-1 text-[10px] sm:text-xs font-bold text-amber-50 whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                  >
+                    <LogOut className="w-3 h-3 sm:w-3.5 sm:h-3.5 text-amber-300 shrink-0" aria-hidden="true" />
+                    <span>EXIT SCHOOL</span>
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowScoreboard((prev) => !prev);
+                      setShowCameraSettings(false);
+                      setShowAudioSettings(false);
+                    }}
+                    onPointerDown={(e) => e.stopPropagation()}
+                    aria-expanded={showScoreboard}
+                    aria-label="Match timer and scoreboard"
+                    title="Click to view remaining and caught players"
+                    className={`inline-flex items-center gap-1 sm:gap-1.5 min-h-[28px] sm:min-h-[42px] rounded-lg border px-1.5 sm:px-3 py-0.5 sm:py-2 font-mono text-[11px] sm:text-base font-bold tabular-nums transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-400 ${
+                      showScoreboard
+                        ? 'bg-amber-500 text-[#1d140e] border-amber-200'
+                        : hud.countdownSeconds === 0 && hud.timeRemaining <= 15
+                          ? 'bg-rose-950/92 hover:bg-rose-900 text-rose-100 border-rose-400/70'
+                          : 'bg-[#1d140e]/85 hover:bg-[#2c1f16] text-amber-300 border-amber-100/20'
+                    }`}
+                  >
+                    <Clock className="w-3 h-3 sm:w-4 sm:h-4 shrink-0" aria-hidden="true" />
+                    <span>{formatClock(hud.timeRemaining)}</span>
+                  </button>
 
-              <div
-                aria-label={`${hud.remainingHiders} of ${hud.totalHiders} players still hiding`}
-                title={`${hud.remainingHiders} of ${hud.totalHiders} players still hiding`}
-                className="inline-flex items-center gap-1 sm:gap-1.5 min-h-[26px] sm:min-h-[42px] rounded-lg border border-amber-100/20 bg-[#1d140e]/85 px-1.5 sm:px-3 py-0.5 sm:py-2 text-[10px] sm:text-sm font-semibold text-amber-50 whitespace-nowrap shrink-0"
-              >
-                <EyeOff
-                  className="w-2.5 h-2.5 sm:w-3.5 sm:h-3.5 text-emerald-300 shrink-0"
-                  aria-hidden="true"
-                />
-                <span className="hidden sm:inline text-amber-100/75">
-                  Still Hiding:
-                </span>
-                <span className="font-mono font-bold tabular-nums text-emerald-300">
-                  {hud.remainingHiders}/{hud.totalHiders}
-                </span>
-              </div>
+                  <div
+                    aria-label={`${hud.remainingHiders} of ${hud.totalHiders} players still hiding`}
+                    title={`${hud.remainingHiders} of ${hud.totalHiders} players still hiding`}
+                    className="inline-flex items-center gap-1 sm:gap-1.5 min-h-[26px] sm:min-h-[42px] rounded-lg border border-amber-100/20 bg-[#1d140e]/85 px-1.5 sm:px-3 py-0.5 sm:py-2 text-[10px] sm:text-sm font-semibold text-amber-50 whitespace-nowrap shrink-0"
+                  >
+                    <EyeOff
+                      className="w-2.5 h-2.5 sm:w-3.5 sm:h-3.5 text-emerald-300 shrink-0"
+                      aria-hidden="true"
+                    />
+                    <span className="hidden sm:inline text-amber-100/75">
+                      Still Hiding:
+                    </span>
+                    <span className="font-mono font-bold tabular-nums text-emerald-300">
+                      {hud.remainingHiders}/{hud.totalHiders}
+                    </span>
+                  </div>
+                </>
+              )}
 
-              {showScoreboard && (
+              {showScoreboard && !hud.isExploringSchool && (
                 <div
                   onPointerDown={(e) => e.stopPropagation()}
                   className="absolute top-full left-0 mt-1.5 w-[228px] sm:w-[252px] max-w-[calc(100vw-6rem)] max-h-[calc(100dvh-6rem)] overflow-y-auto rounded-xl border border-amber-200/20 bg-[#1f150f]/95 p-3 sm:p-4 shadow-2xl"
@@ -2295,57 +2486,275 @@ export default function App() {
             </div>
           )}
 
-          {/* Transient top-center match event notice (hidden during hider countdown banner to prevent overlap) */}
+          {/* Transient top-center match event notice (shifted slightly when Free Cam bar sits at top) */}
           {hud.eventBanner &&
             !(hud.countdownSeconds > 0 && hud.playerRole === 'hider') && (
-              <div className="pointer-events-none absolute top-[118px] sm:top-16 left-1/2 -translate-x-1/2 z-10 max-w-[calc(100vw-1rem)] truncate rounded-lg bg-[#1d140e]/88 border border-amber-200/25 px-3 sm:px-4 py-1.5 sm:py-2 text-[11px] sm:text-sm font-medium text-amber-50 text-center">
+              <div
+                className={`pointer-events-none absolute left-1/2 -translate-x-1/2 z-10 max-w-[calc(100vw-1rem)] truncate rounded-lg bg-[#1d140e]/88 border border-amber-200/25 px-3 sm:px-4 py-1.5 sm:py-2 text-[11px] sm:text-sm font-medium text-amber-50 text-center ${
+                  hud.playerCaught &&
+                  hud.isSpectating &&
+                  hud.spectateCameraMode === 'free'
+                    ? 'top-[142px] sm:top-[114px]'
+                    : 'top-[118px] sm:top-16'
+                }`}
+              >
                 {hud.eventBanner}
               </div>
             )}
 
-          {/* Caught Player Spectating Bar (cycle across remaining hiders and seeker) */}
+          {/* Caught Player Spectator Mode HUD (Follow active hiders/seeker + Free Camera, portrait-first) */}
           {hud.playerCaught && (
-            <div
-              onPointerDown={(e) => e.stopPropagation()}
-              className={`absolute left-1/2 -translate-x-1/2 z-10 flex items-center gap-1.5 sm:gap-2 max-w-[calc(100vw-1rem)] rounded-xl border border-amber-200/30 bg-[#1d140e]/92 px-2.5 sm:px-3 py-1.5 sm:py-2 shadow-2xl ${
-                isInOnlineRoom ? 'bottom-[70px] sm:bottom-6' : 'bottom-4 sm:bottom-6'
-              }`}
-            >
-              {hud.spectatingCanCycle && (
-                <button
-                  type="button"
-                  onClick={() => engineRef.current?.cycleSpectateTarget(-1)}
-                  aria-label="Previous player to watch"
-                  className="inline-flex items-center justify-center min-w-[34px] min-h-[34px] sm:min-w-[38px] sm:min-h-[38px] rounded-lg border border-amber-100/20 bg-[#2a1d14] hover:bg-[#3a281c] text-amber-100 transition-colors cursor-pointer shrink-0"
-                >
-                  <ChevronLeft className="w-4 h-4" aria-hidden="true" />
-                </button>
-              )}
+            <>
+              <div
+                onPointerDown={(e) => e.stopPropagation()}
+                className={`absolute left-1/2 -translate-x-1/2 z-20 w-[calc(100vw-1rem)] max-w-[388px] rounded-2xl border border-amber-200/35 bg-[#1a120c]/94 px-2.5 sm:px-3 py-2 shadow-2xl ${
+                  hud.isSpectating && hud.spectateCameraMode === 'free'
+                    ? 'top-[86px] sm:top-16'
+                    : 'bottom-3 sm:bottom-5'
+                }`}
+              >
+                {/* Row 1: Spectator status + Camera Mode Switcher (Follow vs Free Cam) + Active Players Picker */}
+                <div className="flex items-center justify-between gap-1.5">
+                  <div className="inline-flex items-center gap-1 text-[10px] sm:text-[11px] font-bold uppercase tracking-wider text-sky-300 shrink-0">
+                    <Eye className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                    <span>Spectating</span>
+                  </div>
 
-              <div className="px-1 sm:px-2 text-center min-w-0">
-                <div className="text-[11px] sm:text-xs font-bold text-amber-50 truncate">
-                  {hud.spectatingName
-                    ? `Watching ${hud.spectatingName} (${hud.spectatingRole === 'seeker' ? 'Seeker' : 'Hider'})`
-                    : 'Caught! Switching to live view...'}
+                  {hud.isSpectating && (
+                    <div className="flex items-center gap-1 min-w-0">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          engineRef.current?.setSpectateCameraMode('follow')
+                        }
+                        aria-pressed={hud.spectateCameraMode === 'follow'}
+                        className={`inline-flex items-center gap-1 min-h-[28px] rounded-lg border px-2 py-0.5 text-[10px] sm:text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                          hud.spectateCameraMode === 'follow'
+                            ? 'bg-amber-500 text-[#1d140e] border-amber-200'
+                            : 'bg-[#261a12] hover:bg-[#342318] text-amber-100/85 border-amber-100/20'
+                        }`}
+                      >
+                        <User className="w-3 h-3 shrink-0" aria-hidden="true" />
+                        <span>Follow</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowSpectatorPicker(false);
+                          engineRef.current?.setSpectateCameraMode('free');
+                        }}
+                        aria-pressed={hud.spectateCameraMode === 'free'}
+                        className={`inline-flex items-center gap-1 min-h-[28px] rounded-lg border px-2 py-0.5 text-[10px] sm:text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                          hud.spectateCameraMode === 'free'
+                            ? 'bg-sky-400 text-[#0f172a] border-sky-200'
+                            : 'bg-[#261a12] hover:bg-[#342318] text-amber-100/85 border-amber-100/20'
+                        }`}
+                      >
+                        <Video className="w-3 h-3 shrink-0" aria-hidden="true" />
+                        <span>Free Cam</span>
+                      </button>
+
+                      {hud.spectateTargets.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setShowSpectatorPicker((prev) => !prev)
+                          }
+                          aria-expanded={showSpectatorPicker}
+                          aria-label="Choose active player camera"
+                          className={`inline-flex items-center gap-1 min-h-[28px] rounded-lg border px-2 py-0.5 text-[10px] sm:text-[11px] font-bold transition-colors whitespace-nowrap cursor-pointer ${
+                            showSpectatorPicker
+                              ? 'bg-amber-500/25 text-amber-100 border-amber-300'
+                              : 'bg-[#261a12] hover:bg-[#342318] text-amber-100/85 border-amber-100/20'
+                          }`}
+                        >
+                          <Users className="w-3 h-3 shrink-0" aria-hidden="true" />
+                          <span className="tabular-nums">
+                            {hud.spectateTargets.length}
+                          </span>
+                        </button>
+                      )}
+                    </div>
+                  )}
                 </div>
-                <div className="text-[10px] sm:text-[11px] text-amber-200/80 whitespace-nowrap tabular-nums">
-                  {hud.remainingHiders}{' '}
-                  {hud.remainingHiders === 1 ? 'hider' : 'hiders'} hiding ·{' '}
-                  {formatClock(hud.timeRemaining)} left
-                </div>
+
+                {/* Collapsible Active Players List (all remaining hiders + seeker) */}
+                {hud.isSpectating &&
+                  showSpectatorPicker &&
+                  hud.spectateTargets.length > 0 && (
+                    <div className="mt-2 rounded-xl border border-amber-100/15 bg-[#120c08]/95 p-1.5 max-h-[144px] overflow-y-auto">
+                      <div className="px-1.5 pb-1 text-[10px] font-semibold text-amber-200/75 flex items-center justify-between">
+                        <span>Active Players</span>
+                        <span>Tap to watch</span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1">
+                        {hud.spectateTargets.map((target) => {
+                          const isWatched =
+                            hud.spectateCameraMode === 'follow' &&
+                            hud.spectatingTargetId === target.id;
+                          return (
+                            <button
+                              key={target.id}
+                              type="button"
+                              onClick={() => {
+                                engineRef.current?.setSpectateTarget(target.id);
+                                setShowSpectatorPicker(false);
+                              }}
+                              className={`flex items-center justify-between gap-1.5 min-h-[30px] rounded-lg border px-2 py-1 text-left text-[10.5px] font-semibold transition-colors cursor-pointer ${
+                                isWatched
+                                  ? 'bg-amber-500/25 border-amber-300 text-amber-50'
+                                  : 'bg-[#1d140e] hover:bg-[#2a1d14] border-amber-100/12 text-amber-100/90'
+                              }`}
+                            >
+                              <span className="truncate">{target.name}</span>
+                              <span
+                                className={`text-[9px] font-bold uppercase shrink-0 px-1 py-0.5 rounded ${
+                                  target.role === 'seeker'
+                                    ? 'bg-orange-500/25 text-orange-300'
+                                    : 'bg-emerald-500/20 text-emerald-300'
+                                }`}
+                              >
+                                {target.role === 'seeker' ? 'Seeker' : 'Hider'}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
+
+                {/* Row 2: Active Camera Info + Prev/Next Player Switcher */}
+                {hud.isSpectating && hud.spectateCameraMode === 'free' ? (
+                  <div className="mt-1.5 flex items-center justify-between gap-2 border-t border-amber-100/12 pt-1.5 text-[10px] sm:text-[11px]">
+                    <span className="text-sky-200/90 truncate">
+                      Free Camera · Joystick fly · Swipe look
+                    </span>
+                    <span className="text-amber-200/90 font-mono tabular-nums whitespace-nowrap shrink-0">
+                      {hud.remainingHiders} hiding · {formatClock(hud.timeRemaining)}
+                    </span>
+                  </div>
+                ) : (
+                  <div className="mt-1.5 flex items-center gap-1.5 border-t border-amber-100/12 pt-1.5">
+                    {hud.spectatingCanCycle && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          engineRef.current?.cycleSpectateTarget(-1)
+                        }
+                        aria-label="Previous player camera"
+                        className="inline-flex items-center justify-center min-w-[34px] min-h-[34px] rounded-lg border border-amber-100/20 bg-[#2a1d14] hover:bg-[#3a281c] text-amber-100 transition-colors cursor-pointer shrink-0"
+                      >
+                        <ChevronLeft className="w-4 h-4" aria-hidden="true" />
+                      </button>
+                    )}
+
+                    <div className="flex-1 min-w-0 text-center px-1">
+                      <div className="flex items-center justify-center gap-1.5 min-w-0">
+                        <span className="text-[11px] sm:text-xs font-bold text-amber-50 truncate">
+                          {hud.spectatingName
+                            ? `Watching ${hud.spectatingName}`
+                            : 'Caught! Switching to spectator view...'}
+                        </span>
+                        {hud.spectatingRole && (
+                          <span
+                            className={`text-[9.5px] font-bold uppercase px-1.5 py-0.5 rounded shrink-0 ${
+                              hud.spectatingRole === 'seeker'
+                                ? 'bg-orange-500/25 text-orange-300 border border-orange-400/35'
+                                : 'bg-emerald-500/20 text-emerald-300 border border-emerald-400/35'
+                            }`}
+                          >
+                            {hud.spectatingRole === 'seeker' ? 'Seeker' : 'Hider'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-0.5 text-[10px] sm:text-[11px] text-amber-200/80 whitespace-nowrap tabular-nums">
+                        {hud.remainingHiders}{' '}
+                        {hud.remainingHiders === 1 ? 'hider' : 'hiders'} hiding ·{' '}
+                        {formatClock(hud.timeRemaining)} left
+                      </div>
+                    </div>
+
+                    {hud.spectatingCanCycle && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          engineRef.current?.cycleSpectateTarget(1)
+                        }
+                        aria-label="Next player camera"
+                        className="inline-flex items-center justify-center min-w-[34px] min-h-[34px] rounded-lg border border-amber-100/20 bg-[#2a1d14] hover:bg-[#3a281c] text-amber-100 transition-colors cursor-pointer shrink-0"
+                      >
+                        <ChevronRight className="w-4 h-4" aria-hidden="true" />
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
 
-              {hud.spectatingCanCycle && (
-                <button
-                  type="button"
-                  onClick={() => engineRef.current?.cycleSpectateTarget(1)}
-                  aria-label="Next player to watch"
-                  className="inline-flex items-center justify-center min-w-[34px] min-h-[34px] sm:min-w-[38px] sm:min-h-[38px] rounded-lg border border-amber-100/20 bg-[#2a1d14] hover:bg-[#3a281c] text-amber-100 transition-colors cursor-pointer shrink-0"
-                >
-                  <ChevronRight className="w-4 h-4" aria-hidden="true" />
-                </button>
+              {/* Free Camera Flight Controls (portrait joystick + altitude Up/Down; never moves caught player) */}
+              {hud.isSpectating && hud.spectateCameraMode === 'free' && (
+                <>
+                  <div className="absolute bottom-4 left-3 sm:bottom-5 sm:left-5 z-10 flex flex-col items-start gap-1.5">
+                    <TouchJoystick onMove={handleTouchMove} />
+                    <div className="pointer-events-none text-[10px] sm:text-xs font-semibold text-sky-200 bg-[#141c24]/85 border border-sky-300/30 px-2 py-0.5 rounded">
+                      <span className="sm:hidden">FREE CAM FLY</span>
+                      <span className="hidden sm:inline">
+                        WASD fly · Space/Shift up/down · Drag look · F follow
+                      </span>
+                    </div>
+                  </div>
+
+                  <div
+                    onPointerDown={(e) => e.stopPropagation()}
+                    className="absolute bottom-4 right-3 sm:bottom-6 sm:right-5 z-10 flex flex-col items-end gap-1.5 select-none touch-none"
+                  >
+                    <button
+                      type="button"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        engineRef.current?.setFreeCamVerticalInput(1);
+                      }}
+                      onPointerUp={() =>
+                        engineRef.current?.setFreeCamVerticalInput(0)
+                      }
+                      onPointerLeave={() =>
+                        engineRef.current?.setFreeCamVerticalInput(0)
+                      }
+                      onPointerCancel={() =>
+                        engineRef.current?.setFreeCamVerticalInput(0)
+                      }
+                      aria-label="Fly camera up"
+                      className="inline-flex items-center justify-center gap-1 min-w-[82px] sm:min-w-[100px] min-h-[42px] sm:min-h-[46px] rounded-xl border border-sky-300/35 bg-[#15202b]/90 hover:bg-[#1e2d3b] active:bg-sky-400 active:text-[#0f172a] px-3 py-2 text-xs font-bold text-sky-100 shadow-lg cursor-pointer touch-none select-none"
+                    >
+                      <ArrowUp className="w-4 h-4 shrink-0" aria-hidden="true" />
+                      <span>UP</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                        engineRef.current?.setFreeCamVerticalInput(-1);
+                      }}
+                      onPointerUp={() =>
+                        engineRef.current?.setFreeCamVerticalInput(0)
+                      }
+                      onPointerLeave={() =>
+                        engineRef.current?.setFreeCamVerticalInput(0)
+                      }
+                      onPointerCancel={() =>
+                        engineRef.current?.setFreeCamVerticalInput(0)
+                      }
+                      aria-label="Fly camera down"
+                      className="inline-flex items-center justify-center gap-1 min-w-[82px] sm:min-w-[100px] min-h-[42px] sm:min-h-[46px] rounded-xl border border-sky-300/35 bg-[#15202b]/90 hover:bg-[#1e2d3b] active:bg-sky-400 active:text-[#0f172a] px-3 py-2 text-xs font-bold text-sky-100 shadow-lg cursor-pointer touch-none select-none"
+                    >
+                      <ArrowDown className="w-4 h-4 shrink-0" aria-hidden="true" />
+                      <span>DOWN</span>
+                    </button>
+                  </div>
+                </>
               )}
-            </div>
+            </>
           )}
 
           {/* Bottom-left Mobile Touch Joystick + desktop hint */}
@@ -2354,16 +2763,98 @@ export default function App() {
               <TouchJoystick onMove={handleTouchMove} />
               <div className="pointer-events-none hidden sm:block text-xs text-amber-50/85 bg-[#1d140e]/75 px-2.5 py-1 rounded">
                 {hud.playerRole === 'hider'
-                  ? 'WASD move · Space jump · Drag rotate · R center · C hide'
-                  : 'WASD move · Space jump · Drag rotate · R center · E tag'}
+                  ? 'WASD move · Space jump · C hide · F handshake · G sit · E slap · B bell'
+                  : 'WASD move · Space jump · G sit · E tag/slap · B bell'}
               </div>
             </div>
           )}
 
-          {/* Bottom-right role action column: JUMP stacked cleanly above HIDE / TAG */}
+          {/* Bottom-right role action column: HANDSHAKE, SIT/STAND, RING BELL, SLAP, JUMP, HIDE / TAG */}
           {!hud.playerCaught &&
             !(hud.countdownSeconds > 0 && hud.playerRole === 'seeker') && (
             <div className="absolute bottom-4 right-3 sm:bottom-6 sm:right-5 z-10 flex flex-col items-end gap-1.5 sm:gap-2">
+              {hud.canHandshake && (
+                <button
+                  type="button"
+                  onClick={handleHandshake}
+                  aria-label={
+                    hud.handshakeTargetName
+                      ? `Shake hands with ${hud.handshakeTargetName}`
+                      : 'Shake hands with nearby player'
+                  }
+                  className="inline-flex items-center justify-center gap-1.5 min-w-[92px] sm:min-w-[116px] min-h-[40px] sm:min-h-[44px] rounded-xl border border-emerald-200/80 bg-[#237a57] hover:bg-[#2a8f67] active:scale-[0.97] px-3 sm:px-3.5 py-1.5 sm:py-2 text-xs sm:text-sm font-bold tracking-wide text-white shadow-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-emerald-200"
+                >
+                  <Handshake className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>SHAKE</span>
+                </button>
+              )}
+
+              {(hud.canSit || hud.isSitting) && (
+                <button
+                  type="button"
+                  onClick={handleToggleSit}
+                  aria-label={
+                    hud.isSitting
+                      ? `Stand up from ${hud.seatLabel ?? 'seat'}`
+                      : `Sit on ${hud.seatLabel ?? 'seat'}`
+                  }
+                  className={`inline-flex items-center justify-center gap-1.5 min-w-[92px] sm:min-w-[116px] min-h-[40px] sm:min-h-[44px] rounded-xl border px-3 sm:px-3.5 py-1.5 sm:py-2 text-xs sm:text-sm font-bold tracking-wide shadow-lg transition-colors active:scale-[0.97] whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-200 ${
+                    hud.isSitting
+                      ? 'border-amber-200/90 bg-amber-500 hover:bg-amber-400 text-[#1d140e]'
+                      : 'border-amber-200/55 bg-[#2a1d14]/92 hover:bg-[#3a291c] text-amber-50'
+                  }`}
+                >
+                  <Armchair className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>{hud.isSitting ? 'STAND' : 'SIT'}</span>
+                </button>
+              )}
+
+              {hud.canRingTempleBell && (
+                <button
+                  type="button"
+                  onClick={handleRingTempleBell}
+                  aria-label={
+                    hud.templeBellLabel
+                      ? `Ring ${hud.templeBellLabel}`
+                      : 'Ring Temple Bell'
+                  }
+                  className="inline-flex items-center justify-center gap-1.5 min-w-[92px] sm:min-w-[116px] min-h-[44px] sm:min-h-[48px] rounded-xl border border-amber-200/85 bg-[#c8861e] hover:bg-[#da9527] active:scale-[0.97] px-3 sm:px-4 py-2 text-xs sm:text-sm font-bold tracking-wide text-[#1d140e] shadow-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-200"
+                >
+                  <Bell className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>RING BELL</span>
+                </button>
+              )}
+
+              {hud.playerRole === 'hider' && hud.canSlapHider ? (
+                <button
+                  type="button"
+                  onClick={handleSlapHider}
+                  aria-label={
+                    hud.slapTargetName
+                      ? `Slap ${hud.slapTargetName}`
+                      : 'Slap nearby hider'
+                  }
+                  className="inline-flex items-center justify-center gap-1.5 min-w-[92px] sm:min-w-[116px] min-h-[44px] sm:min-h-[48px] rounded-xl border border-amber-200/80 bg-[#d96b27] hover:bg-[#e87933] active:scale-[0.97] px-3 sm:px-4 py-2 text-xs sm:text-sm font-bold tracking-wide text-white shadow-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-200"
+                >
+                  <Hand className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>SLAP</span>
+                </button>
+              ) : hud.canSlapNpc ? (
+                <button
+                  type="button"
+                  onClick={handleSlapNpc}
+                  aria-label={
+                    hud.slapNpcLabel
+                      ? `Slap ${hud.slapNpcLabel}`
+                      : 'Slap nearby villager'
+                  }
+                  className="inline-flex items-center justify-center gap-1.5 min-w-[92px] sm:min-w-[116px] min-h-[44px] sm:min-h-[48px] rounded-xl border border-amber-200/80 bg-[#d96b27] hover:bg-[#e87933] active:scale-[0.97] px-3 sm:px-4 py-2 text-xs sm:text-sm font-bold tracking-wide text-white shadow-lg transition-colors whitespace-nowrap shrink-0 cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-200"
+                >
+                  <Hand className="w-4 h-4 shrink-0" aria-hidden="true" />
+                  <span>SLAP</span>
+                </button>
+              ) : null}
+
               <button
                 type="button"
                 onClick={handleJump}
@@ -2409,70 +2900,86 @@ export default function App() {
             </div>
           )}
 
-          {/* Online Multiplayer Chat & Emotes HUD Controls (active across all 8 maps) */}
-          {isInOnlineRoom && (
+          {/* Expressive Emotes (Solo, Explore & Online) + Online Multiplayer Chat HUD Controls */}
+          {(!hud.playerCaught || isInOnlineRoom) && (
             <>
               <div
                 onPointerDown={(e) => e.stopPropagation()}
-                className={`absolute bottom-4 sm:bottom-6 z-20 flex items-center gap-1.5 sm:gap-2 ${
+                className={`absolute z-20 flex items-center gap-1.5 sm:gap-2 ${
                   !hud.playerCaught
-                    ? 'right-[112px] sm:right-[140px]'
-                    : 'right-3 sm:right-5'
+                    ? 'bottom-4 sm:bottom-6 right-[112px] sm:right-[140px]'
+                    : hud.spectateCameraMode === 'free'
+                      ? 'bottom-[114px] sm:bottom-6 right-3 sm:right-[120px]'
+                      : 'bottom-[114px] sm:bottom-6 right-3 sm:right-5'
                 }`}
               >
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowEmotePicker((prev) => !prev);
-                    setShowChatDrawer(false);
-                  }}
-                  aria-expanded={showEmotePicker}
-                  aria-label="Open emotes"
-                  title="Emotes"
-                  className={`inline-flex items-center justify-center gap-1.5 min-w-[42px] min-h-[42px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl border px-2.5 sm:px-3 py-2 text-xs sm:text-sm font-bold transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
-                    showEmotePicker
-                      ? 'bg-amber-500 text-[#1d140e] border-amber-200'
-                      : 'bg-[#1d140e]/88 hover:bg-[#2c1f16] text-amber-50 border-amber-100/20'
-                  }`}
-                >
-                  <Smile className="w-4 h-4 shrink-0" aria-hidden="true" />
-                  <span className="hidden sm:inline">Emote</span>
-                </button>
+                {!hud.playerCaught && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowEmotePicker((prev) => !prev);
+                      setShowChatDrawer(false);
+                    }}
+                    aria-expanded={showEmotePicker}
+                    aria-label="Open expressions and emotes"
+                    title="Expressions & Emotes"
+                    className={`inline-flex items-center justify-center gap-1.5 min-w-[42px] min-h-[42px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl border px-2.5 sm:px-3 py-2 text-xs sm:text-sm font-bold transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                      showEmotePicker
+                        ? 'bg-amber-500 text-[#1d140e] border-amber-200'
+                        : 'bg-[#1d140e]/88 hover:bg-[#2c1f16] text-amber-50 border-amber-100/20'
+                    }`}
+                  >
+                    <Smile className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span className="hidden sm:inline">Emote</span>
+                  </button>
+                )}
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowChatDrawer((prev) => !prev);
-                    setShowEmotePicker(false);
-                  }}
-                  aria-expanded={showChatDrawer}
-                  aria-label="Toggle room chat"
-                  title="Room Chat & Quick Chat"
-                  className={`relative inline-flex items-center justify-center gap-1.5 min-w-[42px] min-h-[42px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl border px-2.5 sm:px-3 py-2 text-xs sm:text-sm font-bold transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
-                    showChatDrawer
-                      ? 'bg-amber-500 text-[#1d140e] border-amber-200'
-                      : 'bg-[#1d140e]/88 hover:bg-[#2c1f16] text-amber-50 border-amber-100/20'
-                  }`}
-                >
-                  <MessageSquare className="w-4 h-4 shrink-0" aria-hidden="true" />
-                  <span className="hidden sm:inline">Chat</span>
-                  {unreadChatCount > 0 && !showChatDrawer && (
-                    <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] rounded-full bg-[#d96b27] border border-amber-200 px-1 text-[10px] font-extrabold text-white flex items-center justify-center tabular-nums">
-                      {unreadChatCount}
+                {isInOnlineRoom && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setShowChatDrawer((prev) => !prev);
+                      setShowEmotePicker(false);
+                    }}
+                    aria-expanded={showChatDrawer}
+                    aria-label={
+                      hud.playerCaught
+                        ? 'Toggle spectator chat'
+                        : 'Toggle room chat'
+                    }
+                    title={
+                      hud.playerCaught
+                        ? 'Spectator Chat (hidden from active players)'
+                        : 'Room Chat & Quick Chat'
+                    }
+                    className={`relative inline-flex items-center justify-center gap-1.5 min-w-[42px] min-h-[42px] sm:min-w-[48px] sm:min-h-[48px] rounded-xl border px-2.5 sm:px-3 py-2 text-xs sm:text-sm font-bold transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                      showChatDrawer
+                        ? 'bg-amber-500 text-[#1d140e] border-amber-200'
+                        : 'bg-[#1d140e]/88 hover:bg-[#2c1f16] text-amber-50 border-amber-100/20'
+                    }`}
+                  >
+                    <MessageSquare className="w-4 h-4 shrink-0" aria-hidden="true" />
+                    <span className="hidden sm:inline">
+                      {hud.playerCaught ? 'Spec Chat' : 'Chat'}
                     </span>
-                  )}
-                </button>
+                    {unreadChatCount > 0 && !showChatDrawer && (
+                      <span className="absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] rounded-full bg-[#d96b27] border border-amber-200 px-1 text-[10px] font-extrabold text-white flex items-center justify-center tabular-nums">
+                        {unreadChatCount}
+                      </span>
+                    )}
+                  </button>
+                )}
               </div>
 
-              {/* Compact Quick Emotes Strip */}
-              {showEmotePicker && (
+              {/* Compact Quick Expressions & Emotes Strip (disabled while spectating) */}
+              {showEmotePicker && !hud.playerCaught && (
                 <div
                   onPointerDown={(e) => e.stopPropagation()}
                   className="absolute bottom-[74px] sm:bottom-[88px] right-2 sm:right-5 z-20 max-w-[calc(100vw-1rem)] rounded-xl border border-amber-200/25 bg-[#1f150f]/95 p-2 sm:p-2.5 shadow-2xl"
                 >
                   <div className="flex items-center justify-between gap-2 pb-1 mb-1.5 border-b border-amber-100/12">
                     <span className="text-[10.5px] sm:text-[11px] font-bold text-amber-200">
-                      Express Emote
+                      Expressions & Emotes
                     </span>
                     <button
                       type="button"
@@ -2483,7 +2990,7 @@ export default function App() {
                       <X className="w-3.5 h-3.5" aria-hidden="true" />
                     </button>
                   </div>
-                  <div className="flex items-center gap-1 sm:gap-1.5">
+                  <div className="flex flex-wrap items-center gap-1 sm:gap-1.5">
                     {EMOTE_DEFINITIONS.map((em) => (
                       <button
                         key={em.id}
@@ -2502,10 +3009,14 @@ export default function App() {
               )}
 
               {/* Expandable In-Match Room Chat & Quick Chat Drawer */}
-              {showChatDrawer && (
+              {isInOnlineRoom && showChatDrawer && (
                 <div
                   onPointerDown={(e) => e.stopPropagation()}
-                  className="absolute bottom-[74px] sm:bottom-[88px] right-2 sm:right-5 z-20 w-[calc(100vw-1rem)] max-w-[348px] max-h-[calc(100dvh-8.5rem)] overflow-y-auto rounded-2xl border border-amber-200/25 bg-[#1f150f]/96 p-2.5 sm:p-3.5 shadow-2xl"
+                  className={`absolute right-2 sm:right-5 z-20 w-[calc(100vw-1rem)] max-w-[348px] max-h-[calc(100dvh-10rem)] overflow-y-auto rounded-2xl border border-amber-200/25 bg-[#1f150f]/96 p-2.5 sm:p-3.5 shadow-2xl ${
+                    hud.playerCaught
+                      ? 'bottom-[164px] sm:bottom-[88px]'
+                      : 'bottom-[74px] sm:bottom-[88px]'
+                  }`}
                 >
                   <div className="flex items-center justify-between border-b border-amber-100/12 pb-2">
                     <div className="flex items-center gap-1.5">
@@ -2514,7 +3025,9 @@ export default function App() {
                         aria-hidden="true"
                       />
                       <span className="text-xs font-bold text-amber-50">
-                        Room Chat ({onlineRoom.code})
+                        {hud.playerCaught
+                          ? `Spectator Chat (${onlineRoom.code})`
+                          : `Room Chat (${onlineRoom.code})`}
                       </span>
                     </div>
                     <button
@@ -2527,21 +3040,27 @@ export default function App() {
                     </button>
                   </div>
 
-                  {/* Quick Emotes Strip inside Chat Drawer */}
-                  <div className="mt-2 flex items-center gap-1">
-                    {EMOTE_DEFINITIONS.map((em) => (
-                      <button
-                        key={em.id}
-                        type="button"
-                        onClick={() => handleSendEmote(em.id)}
-                        title={em.label}
-                        className="flex-1 inline-flex items-center justify-center gap-1 min-h-[34px] rounded-lg border border-amber-100/15 bg-[#150e0a] hover:bg-[#2b1d14] hover:border-amber-300/40 px-1.5 py-1 text-[11px] font-semibold text-amber-100 transition-colors cursor-pointer"
-                      >
-                        <span>{em.icon}</span>
-                        <span className="hidden sm:inline">{em.label}</span>
-                      </button>
-                    ))}
-                  </div>
+                  {hud.playerCaught ? (
+                    <div className="mt-2 rounded-lg border border-sky-400/30 bg-sky-950/55 px-2.5 py-1.5 text-[10.5px] text-sky-200 leading-snug">
+                      Spectator-only chat: hidden from the Seeker and active hiders so hiding spots stay fair.
+                    </div>
+                  ) : (
+                    /* Quick Emotes Strip inside Chat Drawer (active players only) */
+                    <div className="mt-2 flex items-center gap-1">
+                      {EMOTE_DEFINITIONS.map((em) => (
+                        <button
+                          key={em.id}
+                          type="button"
+                          onClick={() => handleSendEmote(em.id)}
+                          title={em.label}
+                          className="flex-1 inline-flex items-center justify-center gap-1 min-h-[34px] rounded-lg border border-amber-100/15 bg-[#150e0a] hover:bg-[#2b1d14] hover:border-amber-300/40 px-1.5 py-1 text-[11px] font-semibold text-amber-100 transition-colors cursor-pointer"
+                        >
+                          <span>{em.icon}</span>
+                          <span className="hidden sm:inline">{em.label}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
 
                   {/* Live Message Feed (filtered by per-player Mute) */}
                   <div
@@ -2567,6 +3086,11 @@ export default function App() {
                               className="flex items-start justify-between gap-1.5 rounded-lg bg-[#1d140e]/85 px-2 py-1"
                             >
                               <div className="min-w-0 leading-snug break-words">
+                                {msg.spectatorOnly && (
+                                  <span className="mr-1 inline-block rounded bg-sky-500/20 border border-sky-400/35 px-1 py-0.2 text-[9px] font-bold uppercase text-sky-300">
+                                    Spec
+                                  </span>
+                                )}
                                 <span
                                   className={`font-bold ${
                                     msg.senderRole === 'seeker'
@@ -2643,19 +3167,21 @@ export default function App() {
                     )}
                   </div>
 
-                  {/* Quick Chat Presets */}
-                  <div className="mt-2 flex flex-wrap gap-1">
-                    {QUICK_CHAT_MESSAGES.map((qc) => (
-                      <button
-                        key={qc.id}
-                        type="button"
-                        onClick={() => handleSendChat(qc.text, true)}
-                        className="rounded-lg border border-amber-100/15 bg-[#150e0a] hover:bg-[#2a1c14] hover:border-amber-300/40 px-2 py-1 text-[10px] font-semibold text-amber-100/90 transition-colors cursor-pointer"
-                      >
-                        {qc.text}
-                      </button>
-                    ))}
-                  </div>
+                  {/* Quick Chat Presets (active players only; hidden for spectators) */}
+                  {!hud.playerCaught && (
+                    <div className="mt-2 flex flex-wrap gap-1">
+                      {QUICK_CHAT_MESSAGES.map((qc) => (
+                        <button
+                          key={qc.id}
+                          type="button"
+                          onClick={() => handleSendChat(qc.text, true)}
+                          className="rounded-lg border border-amber-100/15 bg-[#150e0a] hover:bg-[#2a1c14] hover:border-amber-300/40 px-2 py-1 text-[10px] font-semibold text-amber-100/90 transition-colors cursor-pointer"
+                        >
+                          {qc.text}
+                        </button>
+                      ))}
+                    </div>
+                  )}
 
                   {/* Live Text Chat Composer */}
                   <form
@@ -2828,6 +3354,16 @@ export default function App() {
                     </span>
                   </button>
 
+                  {/* Explore 1995 Village School Free-Roam Button */}
+                  <button
+                    type="button"
+                    onClick={handleExploreSchool}
+                    className="mt-1.5 w-full inline-flex items-center justify-center gap-1.5 min-h-[38px] sm:min-h-[42px] rounded-xl border border-amber-300/40 bg-[#2b1f14]/95 hover:bg-[#3a2a1b] active:scale-[0.985] px-3 py-1.5 text-xs sm:text-sm font-bold tracking-wide text-amber-200 transition-colors whitespace-nowrap cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                  >
+                    <Compass className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
+                    <span>EXPLORE 1995 VILLAGE SCHOOL</span>
+                  </button>
+
                   {/* 2x2 Menu Navigation Grid: MULTIPLAYER, LEVELS, CHARACTER, FRIENDS */}
                   <div className="mt-2 grid grid-cols-2 gap-1.5 sm:gap-2">
                     <button
@@ -2882,8 +3418,17 @@ export default function App() {
                     </button>
                   </div>
 
-                  {/* PROFILE & STATS + SETTINGS Row */}
+                  {/* LEADERBOARD + PROFILE & STATS Row */}
                   <div className="mt-1.5 sm:mt-2 grid grid-cols-2 gap-1.5 sm:gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleOpenStartSection('leaderboard')}
+                      className="inline-flex items-center justify-center gap-1.5 min-h-[38px] sm:min-h-[42px] rounded-xl border border-amber-300/35 bg-[#28190f]/95 hover:bg-[#362213] px-2.5 py-1.5 text-xs sm:text-sm font-bold text-amber-200 whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                    >
+                      <Trophy className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
+                      <span>LEADERBOARD</span>
+                    </button>
+
                     <button
                       type="button"
                       onClick={() => handleOpenStartSection('profile')}
@@ -2892,30 +3437,32 @@ export default function App() {
                       <BarChart3 className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
                       <span>PROFILE &amp; STATS</span>
                     </button>
+                  </div>
 
+                  {/* SETTINGS + QUIT Row */}
+                  <div className="mt-1.5 grid grid-cols-2 gap-1.5 sm:gap-2">
                     <button
                       type="button"
                       onClick={() => handleOpenStartSection('settings')}
-                      className="inline-flex items-center justify-center gap-1.5 min-h-[38px] sm:min-h-[42px] rounded-xl border border-amber-200/20 bg-[#1e140e]/92 hover:bg-[#2c1d14] px-2.5 py-1.5 text-xs sm:text-sm font-bold text-amber-100 whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                      className="inline-flex items-center justify-center gap-1.5 min-h-[36px] sm:min-h-[40px] rounded-xl border border-amber-200/20 bg-[#1e140e]/92 hover:bg-[#2c1d14] px-2.5 py-1.5 text-xs sm:text-sm font-bold text-amber-100 whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
                     >
                       <SlidersHorizontal className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
                       <span>SETTINGS</span>
                     </button>
-                  </div>
 
-                  {/* QUIT Button */}
-                  <button
-                    type="button"
-                    onClick={handleQuitGame}
-                    className="mt-1.5 w-full inline-flex items-center justify-center gap-1.5 min-h-[34px] sm:min-h-[38px] rounded-xl border border-amber-100/15 bg-[#130c08]/88 hover:bg-[#2c1712] px-3 py-1 text-xs sm:text-sm font-semibold text-amber-100/85 whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
-                  >
-                    <Power className="w-3.5 h-3.5 shrink-0 text-amber-200/80" aria-hidden="true" />
-                    <span>QUIT</span>
-                  </button>
+                    <button
+                      type="button"
+                      onClick={handleQuitGame}
+                      className="inline-flex items-center justify-center gap-1.5 min-h-[36px] sm:min-h-[40px] rounded-xl border border-amber-100/15 bg-[#130c08]/88 hover:bg-[#2c1712] px-3 py-1.5 text-xs sm:text-sm font-semibold text-amber-100/85 whitespace-nowrap transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                    >
+                      <Power className="w-3.5 h-3.5 shrink-0 text-amber-200/80" aria-hidden="true" />
+                      <span>QUIT</span>
+                    </button>
+                  </div>
                 </nav>
               </>
             ) : (
-              /* SUB-SCREENS CONNECTED FROM MAIN MENU (Levels, Character, Multiplayer, Settings, Profile, Friends) */
+              /* SUB-SCREENS CONNECTED FROM MAIN MENU (Levels, Character, Multiplayer, Settings, Profile, Friends, Leaderboard) */
               <div className="pointer-events-auto flex flex-col flex-1 min-h-0 overflow-hidden rounded-2xl border border-amber-200/25 bg-[#1e140e]/92 px-3 py-2.5 sm:px-4 sm:py-3.5 shadow-2xl">
                 {/* Sub-Screen Header with Back & Sound Toggle */}
                 <div className="flex items-center justify-between gap-2 pb-2 sm:pb-2.5 border-b border-amber-100/12 shrink-0">
@@ -2949,6 +3496,7 @@ export default function App() {
                     {startScreen === 'profile' && 'Profile & Stats'}
                     {startScreen === 'friends' && 'Friends'}
                     {startScreen === 'privacy' && 'Privacy & Safety'}
+                    {startScreen === 'leaderboard' && 'Global Leaderboard'}
                   </h2>
 
                   <button
@@ -3038,6 +3586,18 @@ export default function App() {
                     />
                   )}
 
+                  {/* SUB-SCREEN 0D: Global Leaderboard (Daily / Weekly / All-Time Top 100) */}
+                  {startScreen === 'leaderboard' && (
+                    <LeaderboardPanel
+                      firebaseUser={firebaseUser}
+                      authBusy={authBusy}
+                      playerUsername={playerProfile.username}
+                      playerAvatarId={playerProfile.avatarId}
+                      refreshToken={leaderboardRefreshToken}
+                      onSignInGoogle={handleGoogleSignIn}
+                    />
+                  )}
+
                   {/* SUB-SCREEN 1: 8-Level Map Selection Screen */}
                   {startScreen === 'levels' && (
                     <div className="mt-2 sm:mt-3">
@@ -3109,12 +3669,22 @@ export default function App() {
                     })}
                   </div>
 
-                  {/* Compact Selected Map Brief */}
-                  <div className="mt-2 rounded-lg bg-[#150e0a]/85 border border-amber-100/12 px-2.5 py-1.5 text-[10px] sm:text-[11px] text-amber-100/80 leading-snug line-clamp-2">
-                    <span className="font-semibold text-amber-200">
-                      {activeLevel.name}:
-                    </span>{' '}
-                    {activeLevel.description}
+                  {/* Compact Selected Map Brief + Free Explore Village School */}
+                  <div className="mt-2 rounded-lg bg-[#150e0a]/85 border border-amber-100/12 px-2.5 py-1.5 text-[10px] sm:text-[11px] text-amber-100/80 leading-snug">
+                    <div className="line-clamp-2">
+                      <span className="font-semibold text-amber-200">
+                        {activeLevel.name}:
+                      </span>{' '}
+                      {activeLevel.description}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={handleExploreSchool}
+                      className="mt-1.5 w-full inline-flex items-center justify-center gap-1.5 min-h-[32px] rounded-lg border border-amber-300/35 bg-[#2a1d13] hover:bg-[#3a2819] px-2.5 py-1 text-[10.5px] sm:text-xs font-bold text-amber-200 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                    >
+                      <Compass className="w-3.5 h-3.5 text-amber-300 shrink-0" aria-hidden="true" />
+                      <span>Explore 1995 Village School (Free Roam)</span>
+                    </button>
                   </div>
 
                   {/* Start Screen Quick Audio Sliders */}
@@ -4303,6 +4873,11 @@ export default function App() {
                 ? `${hud.remainingHiders} ${hud.remainingHiders === 1 ? 'hider' : 'hiders'} survived until the 3-minute timer ran out.`
                 : `All ${hud.totalHiders} hiders were caught with ${formatClock(hud.timeRemaining)} remaining.`}
             </p>
+            {hud.playerCaught && hud.playerRole === 'hider' && (
+              <p className="mt-1 text-[11px] font-semibold text-sky-300/90">
+                You were caught and spectated the rest of the round.
+              </p>
+            )}
 
             {lastMatchEarnedStars > 0 && (
               <div className="mt-2 inline-flex items-center justify-center gap-2 rounded-xl border border-amber-300/35 bg-[#150e0a]/90 px-3 py-1">
@@ -4546,13 +5121,31 @@ export default function App() {
                   </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleSwitchTeam}
-                  className="mt-2 w-full inline-flex items-center justify-center min-h-[38px] sm:min-h-[42px] rounded-xl bg-[#18100b] hover:bg-[#2a1d15] border border-amber-100/15 px-4 py-1.5 text-[11px] sm:text-xs font-semibold text-amber-100/85 transition-colors whitespace-nowrap cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
-                >
-                  Main Menu
-                </button>
+                <div className="mt-2 grid grid-cols-2 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      activeSoloSessionIdRef.current = null;
+                      setShowScoreboard(false);
+                      setShowCameraSettings(false);
+                      setShowAudioSettings(false);
+                      setStartScreen('leaderboard');
+                      engineRef.current?.returnToStart();
+                    }}
+                    className="inline-flex items-center justify-center gap-1.5 min-h-[38px] sm:min-h-[42px] rounded-xl bg-[#26190f] hover:bg-[#352214] border border-amber-300/30 px-3 py-1.5 text-[11px] sm:text-xs font-bold text-amber-200 transition-colors whitespace-nowrap cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                  >
+                    <Trophy className="w-3.5 h-3.5 text-amber-300 shrink-0" aria-hidden="true" />
+                    <span>Leaderboard</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleSwitchTeam}
+                    className="inline-flex items-center justify-center min-h-[38px] sm:min-h-[42px] rounded-xl bg-[#18100b] hover:bg-[#2a1d15] border border-amber-100/15 px-3 py-1.5 text-[11px] sm:text-xs font-semibold text-amber-100/85 transition-colors whitespace-nowrap cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                  >
+                    Main Menu
+                  </button>
+                </div>
               </>
             )}
           </div>

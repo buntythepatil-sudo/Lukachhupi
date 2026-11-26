@@ -23,6 +23,12 @@ export interface CharacterAnimationInput {
   expression?: FacialExpression;
   eyeLookX?: number;
   eyeLookY?: number;
+  headLookYaw?: number;
+  headLookPitch?: number;
+  isConversing?: boolean;
+  isSpeaking?: boolean;
+  interactionProgress?: number;
+  seatY?: number;
   airHeight?: number;
 }
 
@@ -854,6 +860,12 @@ export function createCustomizedCharacter(
       expression,
       eyeLookX,
       eyeLookY,
+      headLookYaw = 0,
+      headLookPitch = 0,
+      isConversing = false,
+      isSpeaking = false,
+      interactionProgress = 0,
+      seatY = 0.46,
       airHeight = 0,
     }: CharacterAnimationInput) {
       rig.idlePhase += dt;
@@ -870,6 +882,8 @@ export function createCustomizedCharacter(
         caughtElapsed,
         eyeLookX,
         eyeLookY,
+        isConversing,
+        isSpeaking,
         idlePhase: rig.idlePhase,
       });
 
@@ -1104,9 +1118,162 @@ export function createCustomizedCharacter(
         return;
       }
 
-      // Expressive 3D Emotes: Laugh, Wave, Dance, Clap, Cry
+      // Friendly Two-Player Handshake Animation: reach forward, clasp & 3 smooth vertical pumps, warm nod
+      if (state === 'handshake') {
+        const t = rig.idlePhase;
+        const p = THREE.MathUtils.clamp(interactionProgress, 0, 1);
+        // Smooth attack (0..0.18), sustained pumping clasp (0.18..0.82), smooth release (0.82..1)
+        const reachEnv =
+          p < 0.18
+            ? THREE.MathUtils.smoothstep(p, 0, 0.18)
+            : p > 0.82
+              ? 1 - THREE.MathUtils.smoothstep(p, 0.82, 1)
+              : 1;
+        const shakeWave =
+          p > 0.15 && p < 0.85
+            ? Math.sin(((p - 0.15) / 0.7) * Math.PI * 5) * reachEnv
+            : 0;
+        const k = 15;
+
+        const hipY = 0.68 - 0.015 * reachEnv + Math.abs(shakeWave) * 0.01;
+        const torsoX = 0.1 * reachEnv + shakeWave * 0.025;
+        const torsoY = -0.14 * reachEnv; // slight right-shoulder lead
+        const torsoZ = -0.03 * reachEnv;
+
+        const lHipX = 0.08 * reachEnv;
+        const rHipX = -0.1 * reachEnv;
+        const lKneeX = 0.08;
+        const rKneeX = 0.12 * reachEnv + 0.05;
+
+        // Left arm rests naturally slightly back for poise
+        const lArmX = 0.12 * reachEnv;
+        const lArmZ = 0.14;
+        const lElbowX = -0.26;
+
+        // Right arm extends naturally forward at waist/chest height and pumps gently
+        const rArmX = THREE.MathUtils.lerp(0.04, -1.04 + shakeWave * 0.17, reachEnv);
+        const rArmZ = THREE.MathUtils.lerp(-0.1, 0.12, reachEnv);
+        const rElbowX = THREE.MathUtils.lerp(-0.18, -0.52 + shakeWave * 0.14, reachEnv);
+
+        // Warm nod & attentive eye contact
+        const headX = -0.04 + shakeWave * 0.07 + THREE.MathUtils.clamp(headLookPitch, -0.35, 0.35);
+        const headY =
+          THREE.MathUtils.clamp(headLookYaw, -0.55, 0.55) + Math.sin(t * 2.2) * 0.03;
+        const headZ = 0.06 * reachEnv;
+
+        bodyRoot.position.y = THREE.MathUtils.damp(bodyRoot.position.y, hipY, k, dt);
+        torso.rotation.x = THREE.MathUtils.damp(torso.rotation.x, torsoX, k, dt);
+        torso.rotation.y = THREE.MathUtils.damp(torso.rotation.y, torsoY, k, dt);
+        torso.rotation.z = THREE.MathUtils.damp(torso.rotation.z, torsoZ, k, dt);
+        leftLegParts.hip.rotation.x = THREE.MathUtils.damp(leftLegParts.hip.rotation.x, lHipX, k, dt);
+        rightLegParts.hip.rotation.x = THREE.MathUtils.damp(rightLegParts.hip.rotation.x, rHipX, k, dt);
+        leftLegParts.hip.rotation.z = THREE.MathUtils.damp(leftLegParts.hip.rotation.z, -0.04, k, dt);
+        rightLegParts.hip.rotation.z = THREE.MathUtils.damp(rightLegParts.hip.rotation.z, 0.04, k, dt);
+        leftLegParts.knee.rotation.x = THREE.MathUtils.damp(leftLegParts.knee.rotation.x, lKneeX, k, dt);
+        rightLegParts.knee.rotation.x = THREE.MathUtils.damp(rightLegParts.knee.rotation.x, rKneeX, k, dt);
+        leftArmParts.shoulder.rotation.x = THREE.MathUtils.damp(leftArmParts.shoulder.rotation.x, lArmX, k, dt);
+        rightArmParts.shoulder.rotation.x = THREE.MathUtils.damp(rightArmParts.shoulder.rotation.x, rArmX, k, dt);
+        leftArmParts.shoulder.rotation.z = THREE.MathUtils.damp(leftArmParts.shoulder.rotation.z, lArmZ, k, dt);
+        rightArmParts.shoulder.rotation.z = THREE.MathUtils.damp(rightArmParts.shoulder.rotation.z, rArmZ, k, dt);
+        leftArmParts.elbow.rotation.x = THREE.MathUtils.damp(leftArmParts.elbow.rotation.x, lElbowX, k, dt);
+        rightArmParts.elbow.rotation.x = THREE.MathUtils.damp(rightArmParts.elbow.rotation.x, rElbowX, k, dt);
+        head.rotation.x = THREE.MathUtils.damp(head.rotation.x, headX, k, dt);
+        head.rotation.y = THREE.MathUtils.damp(head.rotation.y, headY, 12, dt);
+        head.rotation.z = THREE.MathUtils.damp(head.rotation.z, headZ, 12, dt);
+        return;
+      }
+
+      // Natural Sitting Down, Seated Relaxed Pose, and Standing Up Animations (for charpais & benches)
+      if (state === 'sit_down' || state === 'sitting' || state === 'stand_up') {
+        const t = rig.idlePhase;
+        const p = THREE.MathUtils.clamp(interactionProgress, 0, 1);
+        const ease = p * p * (3 - 2 * p);
+        // Scale hip height cleanly relative to seat surface (account for heightScale)
+        const seatedHipY = THREE.MathUtils.clamp(
+          (seatY + 0.06) / Math.max(0.75, preset.heightScale),
+          0.36,
+          0.56,
+        );
+
+        let sitBlend = 1;
+        let leanArc = 0;
+        let braceHands = 0;
+        if (state === 'sit_down') {
+          sitBlend = ease;
+          leanArc = Math.sin(p * Math.PI);
+          braceHands = leanArc;
+        } else if (state === 'stand_up') {
+          sitBlend = 1 - ease;
+          leanArc = Math.sin(p * Math.PI);
+          braceHands = leanArc;
+        }
+
+        const breathe = Math.sin(t * 2.1) * 0.008 * sitBlend;
+        const legRelax = state === 'sitting' ? Math.sin(t * 0.95) * 0.04 : 0;
+        const hipY = THREE.MathUtils.lerp(0.68, seatedHipY, sitBlend) + breathe;
+        const torsoX = 0.04 * sitBlend + leanArc * 0.28;
+        const torsoY =
+          state === 'sitting'
+            ? THREE.MathUtils.clamp(headLookYaw * 0.22, -0.18, 0.18) + Math.sin(t * 0.7) * 0.02
+            : 0;
+        const torsoZ = state === 'sitting' ? Math.sin(t * 0.85) * 0.02 : 0;
+
+        // Thighs swing horizontally forward, shins hang vertically down naturally
+        const lHipX = THREE.MathUtils.lerp(0, -1.44, sitBlend);
+        const rHipX = THREE.MathUtils.lerp(0, -1.42, sitBlend);
+        const lKneeX = THREE.MathUtils.lerp(0.05, 1.46 + legRelax, sitBlend);
+        const rKneeX = THREE.MathUtils.lerp(0.05, 1.44 - legRelax, sitBlend);
+
+        // Hands rest relaxed on knees/thighs while seated; push gently during sit_down / stand_up
+        const lArmX = THREE.MathUtils.lerp(0.04, -0.58, sitBlend) - braceHands * 0.24;
+        const rArmX = THREE.MathUtils.lerp(0.04, -0.56, sitBlend) - braceHands * 0.24;
+        const lArmZ = THREE.MathUtils.lerp(0.1, 0.18, sitBlend) + braceHands * 0.08;
+        const rArmZ = THREE.MathUtils.lerp(-0.1, -0.18, sitBlend) - braceHands * 0.08;
+        const lElbowX = THREE.MathUtils.lerp(-0.16, -0.72, sitBlend) + braceHands * 0.28;
+        const rElbowX = THREE.MathUtils.lerp(-0.16, -0.7, sitBlend) + braceHands * 0.28;
+
+        // Conversational head look-at & natural nodding while seated
+        const convNod = isConversing
+          ? Math.sin(t * (isSpeaking ? 5.2 : 2.3)) * (isSpeaking ? 0.055 : 0.03)
+          : 0;
+        const convTilt = isConversing ? Math.sin(t * 1.4) * 0.06 : 0;
+        const headX =
+          -leanArc * 0.16 +
+          THREE.MathUtils.clamp(headLookPitch, -0.35, 0.35) +
+          convNod;
+        const headY =
+          isConversing || Math.abs(headLookYaw) > 0.01
+            ? THREE.MathUtils.clamp(headLookYaw, -0.72, 0.72)
+            : Math.sin(t * 0.75) * 0.14;
+        const headZ = convTilt;
+
+        const k = state === 'sitting' ? 11 : 16;
+        bodyRoot.position.y = THREE.MathUtils.damp(bodyRoot.position.y, hipY, k, dt);
+        torso.rotation.x = THREE.MathUtils.damp(torso.rotation.x, torsoX, k, dt);
+        torso.rotation.y = THREE.MathUtils.damp(torso.rotation.y, torsoY, k, dt);
+        torso.rotation.z = THREE.MathUtils.damp(torso.rotation.z, torsoZ, k, dt);
+        leftLegParts.hip.rotation.x = THREE.MathUtils.damp(leftLegParts.hip.rotation.x, lHipX, k, dt);
+        rightLegParts.hip.rotation.x = THREE.MathUtils.damp(rightLegParts.hip.rotation.x, rHipX, k, dt);
+        leftLegParts.hip.rotation.z = THREE.MathUtils.damp(leftLegParts.hip.rotation.z, -0.07 * sitBlend, k, dt);
+        rightLegParts.hip.rotation.z = THREE.MathUtils.damp(rightLegParts.hip.rotation.z, 0.07 * sitBlend, k, dt);
+        leftLegParts.knee.rotation.x = THREE.MathUtils.damp(leftLegParts.knee.rotation.x, lKneeX, k, dt);
+        rightLegParts.knee.rotation.x = THREE.MathUtils.damp(rightLegParts.knee.rotation.x, rKneeX, k, dt);
+        leftArmParts.shoulder.rotation.x = THREE.MathUtils.damp(leftArmParts.shoulder.rotation.x, lArmX, k, dt);
+        rightArmParts.shoulder.rotation.x = THREE.MathUtils.damp(rightArmParts.shoulder.rotation.x, rArmX, k, dt);
+        leftArmParts.shoulder.rotation.z = THREE.MathUtils.damp(leftArmParts.shoulder.rotation.z, lArmZ, k, dt);
+        rightArmParts.shoulder.rotation.z = THREE.MathUtils.damp(rightArmParts.shoulder.rotation.z, rArmZ, k, dt);
+        leftArmParts.elbow.rotation.x = THREE.MathUtils.damp(leftArmParts.elbow.rotation.x, lElbowX, k, dt);
+        rightArmParts.elbow.rotation.x = THREE.MathUtils.damp(rightArmParts.elbow.rotation.x, rElbowX, k, dt);
+        head.rotation.x = THREE.MathUtils.damp(head.rotation.x, headX, 11, dt);
+        head.rotation.y = THREE.MathUtils.damp(head.rotation.y, headY, 10, dt);
+        head.rotation.z = THREE.MathUtils.damp(head.rotation.z, headZ, 10, dt);
+        return;
+      }
+
+      // Expressive 3D Emotes: Laugh, Surprise, Wave, Dance, Clap, Cry
       if (
         state === 'emote_laugh' ||
+        state === 'emote_surprise' ||
         state === 'emote_wave' ||
         state === 'emote_dance' ||
         state === 'emote_clap' ||
@@ -1153,6 +1320,27 @@ export function createCustomizedCharacter(
           headX = -0.24 + shake * 0.1;
           headY = Math.sin(t * 6) * 0.14;
           headZ = Math.cos(t * 7) * 0.12;
+        } else if (state === 'emote_surprise') {
+          // Startled lean-back with raised hands and wide-eyed surprise expression
+          const pulse = Math.sin(t * 9) * 0.04;
+          hipY = 0.68 + Math.abs(Math.sin(t * 4.5)) * 0.045;
+          torsoX = -0.15 + pulse;
+          torsoY = Math.sin(t * 3.2) * 0.06;
+          torsoZ = Math.cos(t * 3.6) * 0.05;
+          lHipX = -0.08;
+          rHipX = -0.08;
+          lKneeX = 0.16;
+          rKneeX = 0.16;
+          // Hands pop up open near cheeks/chest in genuine surprise
+          lArmX = -1.62 + pulse;
+          rArmX = -1.62 - pulse;
+          lArmZ = 0.36;
+          rArmZ = -0.36;
+          lElbowX = -1.35;
+          rElbowX = -1.35;
+          headX = -0.14 + pulse * 0.5;
+          headY = THREE.MathUtils.clamp(headLookYaw, -0.45, 0.45) + Math.sin(t * 4) * 0.08;
+          headZ = 0.08 * Math.sin(t * 3.5);
         } else if (state === 'emote_wave') {
           hipY = 0.68 + Math.sin(t * 3.5) * 0.02;
           torsoX = -0.02;
@@ -1307,8 +1495,22 @@ export function createCustomizedCharacter(
 
         headX = -c * 0.34 - cov * 0.14;
         if (!lookAroundPhase) {
-          headY = cov > 0.25 ? peekCycle * 0.65 * cov : Math.sin(rig.idlePhase * 0.8) * 0.14;
-          headZ = cov * peekCycle * 0.12;
+          if (cov > 0.25) {
+            headY = peekCycle * 0.65 * cov;
+            headZ = cov * peekCycle * 0.12;
+          } else if (isConversing || Math.abs(headLookYaw) > 0.01) {
+            // Attentive conversational head tracking, natural nodding & gentle listening tilt
+            const nodAmp = isSpeaking ? 0.06 : 0.032;
+            const nodFreq = isSpeaking ? 5.6 : 2.4;
+            headX +=
+              THREE.MathUtils.clamp(headLookPitch, -0.35, 0.35) +
+              Math.sin(rig.idlePhase * nodFreq) * nodAmp;
+            headY = THREE.MathUtils.clamp(headLookYaw, -0.68, 0.68);
+            headZ = Math.sin(rig.idlePhase * 1.45) * 0.065;
+            targetTorsoY += THREE.MathUtils.clamp(headLookYaw * 0.18, -0.14, 0.14);
+          } else {
+            headY = Math.sin(rig.idlePhase * 0.8) * 0.14;
+          }
         }
       } else if (state === 'sneak') {
         // Cautious crouched tiptoe sneaking
@@ -1378,6 +1580,10 @@ export function createCustomizedCharacter(
         lElbowX = -0.35 + Math.max(0, -sinW) * 0.18;
         rElbowX = -0.35 + Math.max(0, sinW) * 0.18;
         headX = -0.04;
+        if (!lookAroundPhase && (isConversing || Math.abs(headLookYaw) > 0.01)) {
+          headY = THREE.MathUtils.clamp(headLookYaw * 0.65, -0.45, 0.45);
+          headX += THREE.MathUtils.clamp(headLookPitch * 0.5, -0.2, 0.2);
+        }
       }
 
       // Smooth exponential joint damping for realistic weight and fluid state transitions

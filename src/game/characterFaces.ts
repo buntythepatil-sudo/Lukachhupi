@@ -707,6 +707,8 @@ export interface FacialExpressionRig {
     caughtElapsed?: number;
     eyeLookX?: number;
     eyeLookY?: number;
+    isConversing?: boolean;
+    isSpeaking?: boolean;
     idlePhase: number;
   }) => void;
 }
@@ -740,17 +742,19 @@ function resolveExpressionTargets(
         mouthWidthScale: 0.96,
         eyeScale: 1.0,
       };
-    case 'surprise':
+    case 'surprise': {
+      const gaspPulse = Math.sin(idlePhase * 7.5) * 0.03;
       return {
-        upperLidRot: -0.64,
-        lowerLidRot: 0.46,
-        browYOffset: 0.011,
-        browTilt: 0.08,
-        mouthOpen: 0.88,
-        mouthSmile: -0.1,
-        mouthWidthScale: 0.78,
-        eyeScale: 1.06,
+        upperLidRot: -0.72,
+        lowerLidRot: 0.52,
+        browYOffset: 0.0155,
+        browTilt: 0.11,
+        mouthOpen: 0.94 + gaspPulse,
+        mouthSmile: -0.05,
+        mouthWidthScale: 0.66,
+        eyeScale: 1.11,
       };
+    }
     case 'fear':
       return {
         upperLidRot: -0.6,
@@ -776,11 +780,26 @@ function resolveExpressionTargets(
         eyeScale: 0.98,
       };
     }
+    case 'laughing': {
+      const chuckle = Math.abs(Math.sin(idlePhase * 13.5));
+      const softSquint = 0.03 * chuckle;
+      return {
+        // Joyful crinkled Duchenne-smile eyes + open rhythmic laughing mouth
+        upperLidRot: -0.21 + softSquint,
+        lowerLidRot: 0.075 - softSquint * 0.4,
+        browYOffset: 0.0085 + chuckle * 0.002,
+        browTilt: 0.16,
+        mouthOpen: 0.58 + chuckle * 0.32,
+        mouthSmile: 1.0,
+        mouthWidthScale: 1.22,
+        eyeScale: 1.01,
+      };
+    }
     case 'excited': {
       const laughPulse =
         state === 'emote_laugh' ? Math.abs(Math.sin(idlePhase * 13)) * 0.25 : 0;
       return {
-        upperLidRot: state === 'emote_laugh' ? -0.28 : -0.48,
+        upperLidRot: state === 'emote_laugh' ? -0.26 : -0.48,
         lowerLidRot: state === 'emote_laugh' ? 0.1 : 0.2,
         browYOffset: 0.007,
         browTilt: 0.14,
@@ -839,8 +858,11 @@ export function deriveAutoExpression(
     if (caughtElapsed < 1.35) return 'fear';
     return 'sad';
   }
+  if (state === 'emote_laugh') return 'laughing';
+  if (state === 'emote_surprise') return 'surprise';
+  if (state === 'handshake') return 'happy';
   if (state === 'jump') return 'excited';
-  if (state === 'emote_laugh' || state === 'emote_dance' || state === 'tag_lunge') {
+  if (state === 'emote_dance' || state === 'tag_lunge') {
     return 'excited';
   }
   if (state === 'emote_wave' || state === 'emote_clap') {
@@ -848,6 +870,9 @@ export function deriveAutoExpression(
   }
   if (state === 'emote_cry') {
     return 'sad';
+  }
+  if (state === 'sitting' || state === 'sit_down' || state === 'stand_up') {
+    return defaultExpr === 'determined' ? 'neutral' : 'happy';
   }
   if (state === 'showcase') {
     const waveWindow = idlePhase % 4.6;
@@ -1309,6 +1334,8 @@ export function buildDetailedCharacterFace(
       caughtElapsed = 0,
       eyeLookX,
       eyeLookY,
+      isConversing = false,
+      isSpeaking = false,
       idlePhase,
     }) {
       const resolvedExpr =
@@ -1332,7 +1359,9 @@ export function buildDetailedCharacterFace(
               blinkProgress = 0.001;
             } else {
               blinkProgress = 0;
-              blinkTimer = 2.3 + Math.random() * 3.4;
+              blinkTimer = isConversing
+                ? 1.9 + Math.random() * 2.4
+                : 2.3 + Math.random() * 3.4;
             }
           } else {
             // Asymmetric fast-close / smooth-open curve
@@ -1345,7 +1374,7 @@ export function buildDetailedCharacterFace(
           blinkTimer -= dt;
           if (blinkTimer <= 0) {
             blinkProgress = 0.001;
-            isDoubleBlink = Math.random() < 0.18;
+            isDoubleBlink = Math.random() < (isConversing ? 0.24 : 0.18);
           }
         }
       } else {
@@ -1364,19 +1393,45 @@ export function buildDetailedCharacterFace(
         blinkFactor,
       );
 
+      // Natural conversational lip articulation when talking (chatting)
+      const speechMouthBoost =
+        isSpeaking && resolvedExpr !== 'counting' && targets.mouthOpen < 0.35
+          ? (0.14 + Math.abs(Math.sin(idlePhase * 12.5)) * 0.22) *
+            (0.65 + 0.35 * Math.sin(idlePhase * 4.3))
+          : 0;
+      const speechBrowLift = isSpeaking ? Math.sin(idlePhase * 5.2) * 0.0022 : 0;
+
       curUpperLid = THREE.MathUtils.damp(curUpperLid, targetUpperWithBlink, 24, dt);
       curLowerLid = THREE.MathUtils.damp(curLowerLid, targetLowerWithBlink, 24, dt);
-      curBrowY = THREE.MathUtils.damp(curBrowY, targets.browYOffset, k, dt);
+      curBrowY = THREE.MathUtils.damp(
+        curBrowY,
+        targets.browYOffset + speechBrowLift,
+        k,
+        dt,
+      );
       curBrowTilt = THREE.MathUtils.damp(curBrowTilt, targets.browTilt, k, dt);
-      curMouthOpen = THREE.MathUtils.damp(curMouthOpen, targets.mouthOpen, k, dt);
+      curMouthOpen = THREE.MathUtils.damp(
+        curMouthOpen,
+        Math.min(1, targets.mouthOpen + speechMouthBoost),
+        k,
+        dt,
+      );
       curMouthSmile = THREE.MathUtils.damp(curMouthSmile, targets.mouthSmile, k, dt);
       curMouthWidth = THREE.MathUtils.damp(curMouthWidth, targets.mouthWidthScale, k, dt);
       curEyeScale = THREE.MathUtils.damp(curEyeScale, targets.eyeScale, k, dt);
 
-      // Subtle natural eye glances
+      // Subtle natural eye glances + attentive conversational eye micro-saccades
       let targetLookX = eyeLookX ?? 0;
       let targetLookY = eyeLookY ?? 0;
-      if (eyeLookX === undefined && eyeLookY === undefined) {
+      if (isConversing) {
+        // Organic conversational eye contact micro-saccades (briefly flicking between eyes & slight glance)
+        const saccadeX =
+          Math.sin(idlePhase * 1.9) * 0.042 + Math.sin(idlePhase * 4.7) * 0.018;
+        const saccadeY =
+          Math.cos(idlePhase * 1.4) * 0.025 + Math.sin(idlePhase * 3.1) * 0.012;
+        targetLookX = THREE.MathUtils.clamp(targetLookX + saccadeX, -0.34, 0.34);
+        targetLookY = THREE.MathUtils.clamp(targetLookY + saccadeY, -0.22, 0.22);
+      } else if (eyeLookX === undefined && eyeLookY === undefined) {
         if (lookAroundPhase) {
           targetLookX = Math.sin(lookAroundPhase) * 0.2;
         } else if (state === 'showcase') {
@@ -1386,8 +1441,8 @@ export function buildDetailedCharacterFace(
           targetLookX = Math.sin(idlePhase * 1.7) * 0.18;
         }
       }
-      curEyeLookX = THREE.MathUtils.damp(curEyeLookX, targetLookX, 12, dt);
-      curEyeLookY = THREE.MathUtils.damp(curEyeLookY, targetLookY, 12, dt);
+      curEyeLookX = THREE.MathUtils.damp(curEyeLookX, targetLookX, 14, dt);
+      curEyeLookY = THREE.MathUtils.damp(curEyeLookY, targetLookY, 14, dt);
 
       // Apply to eye sockets & lids
       for (let i = 0; i < 2; i++) {

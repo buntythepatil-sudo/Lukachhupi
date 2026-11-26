@@ -1,3 +1,5 @@
+import type * as THREE from 'three';
+
 export type TeamRole = 'hider' | 'seeker';
 
 export type GamePhase = 'start' | 'playing' | 'ended';
@@ -47,6 +49,7 @@ export type AccessoryType =
 export type FacialExpression =
   | 'neutral'
   | 'happy'
+  | 'laughing'
   | 'excited'
   | 'fear'
   | 'surprise'
@@ -66,7 +69,12 @@ export type CharacterAnimState =
   | 'tag_lunge'
   | 'caught_funny'
   | 'showcase'
+  | 'handshake'
+  | 'sit_down'
+  | 'sitting'
+  | 'stand_up'
   | 'emote_laugh'
+  | 'emote_surprise'
   | 'emote_wave'
   | 'emote_dance'
   | 'emote_clap'
@@ -178,6 +186,14 @@ export interface HudMatchResult {
   isOnline: boolean;
 }
 
+export type SpectateCameraMode = 'follow' | 'free';
+
+export interface SpectateTargetInfo {
+  id: string;
+  name: string;
+  role: TeamRole;
+}
+
 export interface HudSnapshot {
   phase: GamePhase;
   playerRole: TeamRole;
@@ -187,11 +203,27 @@ export interface HudSnapshot {
   countdownSeconds: number;
   isHiding: boolean;
   playerCaught: boolean;
+  isExploringSchool: boolean;
+  isSpectating: boolean;
+  spectatingTargetId: string | null;
   spectatingName: string | null;
   spectatingRole: TeamRole | null;
   spectatingCanCycle: boolean;
+  spectateCameraMode: SpectateCameraMode;
+  spectateTargets: SpectateTargetInfo[];
   canTag: boolean;
   tagTargetName: string | null;
+  canSlapHider: boolean;
+  slapTargetName: string | null;
+  canSlapNpc: boolean;
+  slapNpcLabel: string | null;
+  canRingTempleBell: boolean;
+  templeBellLabel: string | null;
+  canHandshake: boolean;
+  handshakeTargetName: string | null;
+  canSit: boolean;
+  isSitting: boolean;
+  seatLabel: string | null;
   nearestDistance: number;
   seekerMode: SeekerMode;
   hidingSpotLabel: string | null;
@@ -218,6 +250,7 @@ export interface BoxCollider {
   minZ: number;
   maxZ: number;
   blocksSight: boolean;
+  minY?: number;
   topY?: number;
   climbable?: boolean;
 }
@@ -238,6 +271,8 @@ export interface HouseInterior {
   maxX: number;
   minZ: number;
   maxZ: number;
+  minY?: number;
+  maxY?: number;
   doorX: number;
   doorZ: number;
   insideX: number;
@@ -256,6 +291,30 @@ export interface VillageColliders {
   boxes: BoxCollider[];
   circles: CircleCollider[];
   worldRadius: number;
+}
+
+export interface SeatSpot {
+  id: string;
+  x: number;
+  z: number;
+  seatY: number;
+  rotY: number;
+  label: string;
+  kind: 'charpai' | 'bench';
+}
+
+export interface TempleBellInteractive {
+  pivot: THREE.Group;
+  clapper: THREE.Group;
+  ringWave: THREE.Mesh;
+  worldX: number;
+  worldY: number;
+  worldZ: number;
+  swingAngle: number;
+  swingVel: number;
+  swingDir: number;
+  waveProgress: number;
+  label: string;
 }
 
 export interface MinimapRoad {

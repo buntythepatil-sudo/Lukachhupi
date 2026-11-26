@@ -237,35 +237,54 @@ export class MultiplayerClient {
     customization: CharacterCustomization,
     unlockedLevel: number,
     levelId: number,
+    authToken?: string,
+    avatarId?: string,
   ): void {
     this.sendOrQueue({
       type: 'create_room',
       customization,
       unlockedLevel,
       levelId,
+      authToken,
+      avatarId,
     });
   }
 
   public joinRoom(
     roomCode: string,
     customization: CharacterCustomization,
+    authToken?: string,
+    avatarId?: string,
   ): void {
     this.sendOrQueue({
       type: 'join_room',
       roomCode,
       customization,
+      authToken,
+      avatarId,
+    });
+  }
+
+  public identifyAuth(authToken: string, avatarId?: string): void {
+    if (!this.roomCode || !authToken) return;
+    this.sendOrQueue({
+      type: 'identify_auth',
+      authToken,
+      avatarId,
     });
   }
 
   public updateProfile(
     customization: CharacterCustomization,
     unlockedLevel: number,
+    avatarId?: string,
   ): void {
     if (!this.roomCode) return;
     this.sendOrQueue({
       type: 'update_profile',
       customization,
       unlockedLevel,
+      avatarId,
     });
   }
 
@@ -307,6 +326,16 @@ export class MultiplayerClient {
   public sendTagAttempt(targetPlayerId?: string): void {
     if (!this.roomCode) return;
     this.sendRaw({ type: 'try_tag', targetPlayerId });
+  }
+
+  public sendHiderSlap(targetPlayerId?: string): void {
+    if (!this.roomCode) return;
+    this.sendRaw({ type: 'try_slap_hider', targetPlayerId });
+  }
+
+  public sendHandshake(targetPlayerId?: string): void {
+    if (!this.roomCode) return;
+    this.sendRaw({ type: 'try_handshake', targetPlayerId });
   }
 
   public sendChat(text: string, isQuickChat = false): void {

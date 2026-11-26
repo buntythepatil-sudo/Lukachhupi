@@ -1,4 +1,10 @@
-export type EmoteType = 'laugh' | 'wave' | 'dance' | 'clap' | 'cry';
+export type EmoteType =
+  | 'laugh'
+  | 'surprise'
+  | 'wave'
+  | 'dance'
+  | 'clap'
+  | 'cry';
 
 export type ReportReason =
   | 'inappropriate_chat'
@@ -39,6 +45,13 @@ export const EMOTE_DEFINITIONS: EmoteDefinition[] = [
     icon: '😂',
     bubbleText: '😂 Ha ha ha!',
     chatAction: 'is laughing 😂',
+  },
+  {
+    id: 'surprise',
+    label: 'Surprised',
+    icon: '😮',
+    bubbleText: '😮 Arre waah!',
+    chatAction: 'looks surprised 😮',
   },
   {
     id: 'wave',

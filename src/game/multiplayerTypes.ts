@@ -1,6 +1,7 @@
 import type {
   CharacterAnimState,
   CharacterCustomization,
+  FacialExpression,
   MatchWinner,
   TeamRole,
 } from './types';
@@ -37,6 +38,7 @@ export interface OnlinePlayerState {
   rotY: number;
   moveSpeed: number;
   animState: CharacterAnimState;
+  expression?: FacialExpression;
 }
 
 export interface ChatMessagePayload {
@@ -48,6 +50,7 @@ export interface ChatMessagePayload {
   kind: 'text' | 'quick' | 'emote';
   emote?: EmoteType;
   wasFiltered?: boolean;
+  spectatorOnly?: boolean;
   timestamp: number;
 }
 
@@ -82,6 +85,7 @@ export interface PlayerTransformPayload {
   moveSpeed: number;
   isHiding: boolean;
   animState: CharacterAnimState;
+  expression?: FacialExpression;
 }
 
 export interface ClientToServerMessage {
@@ -89,6 +93,7 @@ export interface ClientToServerMessage {
     | 'create_room'
     | 'join_room'
     | 'rejoin_room'
+    | 'identify_auth'
     | 'update_profile'
     | 'select_map'
     | 'start_match'
@@ -96,6 +101,8 @@ export interface ClientToServerMessage {
     | 'leave_room'
     | 'player_state'
     | 'try_tag'
+    | 'try_slap_hider'
+    | 'try_handshake'
     | 'send_chat'
     | 'send_emote'
     | 'report_player'
@@ -103,6 +110,8 @@ export interface ClientToServerMessage {
   roomCode?: string;
   playerId?: string;
   reconnectToken?: string;
+  authToken?: string;
+  avatarId?: string;
   customization?: CharacterCustomization;
   unlockedLevel?: number;
   levelId?: number;
@@ -143,12 +152,24 @@ export interface ServerToClientMessage {
     moveSpeed: number;
     isHiding: boolean;
     animState: CharacterAnimState;
+    expression?: FacialExpression;
     liveStatus: PlayerLiveStatus;
   }>;
-  eventKind?: 'tag_caught' | 'countdown_tick' | 'seek_start' | 'match_end' | 'banner';
+  eventKind?:
+    | 'tag_caught'
+    | 'hider_slap'
+    | 'player_handshake'
+    | 'countdown_tick'
+    | 'seek_start'
+    | 'match_end'
+    | 'banner';
   message?: string;
   secondsLeft?: number;
   winner?: MatchWinner;
   taggedPlayerId?: string;
   seekerPlayerId?: string;
+  slapperPlayerId?: string;
+  actorPlayerId?: string;
+  targetPlayerId?: string;
+  leaderboardUpdated?: boolean;
 }

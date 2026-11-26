@@ -6,6 +6,8 @@ import {
   HidingSpot,
   HouseInterior,
   LevelSpawnPoints,
+  SeatSpot,
+  TempleBellInteractive,
   VillageColliders,
   VillageMinimapLayout,
 } from './types';
@@ -31,6 +33,8 @@ export interface VillageBuildResult {
   pondWater: THREE.Mesh | null;
   minimapLayout: VillageMinimapLayout;
   spawnPoints?: LevelSpawnPoints;
+  templeBells?: TempleBellInteractive[];
+  seats?: SeatSpot[];
 }
 
 interface HouseSpec {
@@ -854,7 +858,7 @@ function buildVillageWell(
   };
 }
 
-function buildHandPump(
+export function buildHandPump(
   x: number,
   z: number,
   rotationY = 0,
@@ -1366,10 +1370,31 @@ export function buildIndianVillage(
     { x: 13.0, z: 14.0, rot: Math.PI / 2, withRadio: false },
     { x: 19.2, z: -22.6, rot: 0.25, withRadio: false },
   ];
-  for (const c of charpaiSpecs) {
+  const seats: SeatSpot[] = [];
+  for (let ci = 0; ci < charpaiSpecs.length; ci++) {
+    const c = charpaiSpecs[ci];
     const ch = buildCharpai(c.x, c.z, c.rot, textures, c.withRadio);
     group.add(ch.group);
     boxes.push(ch.collider);
+
+    // Expose two natural seated positions along the woven charpai edges
+    const cosR = Math.cos(c.rot);
+    const sinR = Math.sin(c.rot);
+    const faceOut = c.rot + Math.PI / 2;
+    const offsets = c.withRadio ? [0.46] : [-0.44, 0.44];
+    for (let oi = 0; oi < offsets.length; oi++) {
+      const localX = 0.24;
+      const localZ = offsets[oi];
+      seats.push({
+        id: `l1_charpai_${ci}_${oi}`,
+        x: c.x + localX * cosR + localZ * sinR,
+        z: c.z - localX * sinR + localZ * cosR,
+        seatY: 0.48,
+        rotY: faceOut,
+        label: 'Charpai',
+        kind: 'charpai',
+      });
+    }
   }
 
   const bicycleSpecs = [
@@ -1465,6 +1490,8 @@ export function buildIndianVillage(
     houseInteriors,
     pondWater: pond.waterMesh ?? null,
     minimapLayout: VILLAGE_MINIMAP_LAYOUT,
+    templeBells: temple.templeBells ?? [],
+    seats,
   };
 }
 

@@ -44,6 +44,13 @@ service cloud.firestore {
         avatarId.matches('^[a-z0-9_\\-]+$');
     }
 
+    function isValidLeaderboardPeriod(periodId) {
+      return periodId is string &&
+        periodId.size() >= 5 &&
+        periodId.size() <= 32 &&
+        periodId.matches('^(all_time|daily_[0-9]{4}-[0-9]{2}-[0-9]{2}|weekly_[0-9]{4}-W[0-9]{2})$');
+    }
+
     function incoming() {
       return request.resource.data;
     }
@@ -1030,6 +1037,36 @@ service cloud.firestore {
         incoming().createdAt == request.time;
 
       allow update, delete: if false;
+    }
+
+    // Global leaderboards (daily, weekly, all-time) — strictly read-only to all clients
+    match /leaderboards/{periodId}/entries/{userId} {
+      allow get: if isValidLeaderboardPeriod(periodId) &&
+        isValidId(userId) &&
+        isSignedIn() &&
+        isEmailVerified();
+
+      allow list: if isValidLeaderboardPeriod(periodId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        request.query.limit != null &&
+        request.query.limit <= 100;
+
+      allow create, update, delete: if false;
+    }
+
+    // Verified match records — owner-readable only, strictly immutable to all clients
+    match /verifiedMatches/{matchId} {
+      allow get: if isValidId(matchId) &&
+        isSignedIn() &&
+        isEmailVerified() &&
+        existing().uid == request.auth.uid;
+
+      allow list: if isSignedIn() &&
+        isEmailVerified() &&
+        resource.data.uid == request.auth.uid;
+
+      allow create, update, delete: if false;
     }
   }
 }

@@ -1048,3 +1048,150 @@ describe('8. Account deletion permissions', () => {
     await assertFails(dbUnverified().doc(`users/${UNVERIFIED_UID}`).delete());
   });
 });
+
+describe('9. Global leaderboard & verified matches tamper protection', () => {
+  const DAILY_PERIOD = 'daily_2026-11-25';
+  const WEEKLY_PERIOD = 'weekly_2026-W48';
+  const ALL_TIME_PERIOD = 'all_time';
+
+  beforeEach(async () => {
+    await testEnv.withSecurityRulesDisabled(async (adminCtx) => {
+      const adminDb = adminCtx.firestore();
+      await adminDb.doc(`leaderboards/${ALL_TIME_PERIOD}/entries/${PLAYER_A_UID}`).set({
+        uid: PLAYER_A_UID,
+        username: 'PlayerA',
+        avatarId: 'raju',
+        periodId: ALL_TIME_PERIOD,
+        wins: 14,
+        completedLevels: [1, 2, 3, 4],
+        updatedAt: serverTimestamp(),
+      });
+      await adminDb.doc(`leaderboards/${DAILY_PERIOD}/entries/${PLAYER_B_UID}`).set({
+        uid: PLAYER_B_UID,
+        username: 'PlayerB',
+        avatarId: 'meena',
+        periodId: DAILY_PERIOD,
+        wins: 3,
+        completedLevels: [1, 2],
+        updatedAt: serverTimestamp(),
+      });
+      await adminDb.doc(`leaderboards/${WEEKLY_PERIOD}/entries/${PLAYER_C_UID}`).set({
+        uid: PLAYER_C_UID,
+        username: 'PlayerC',
+        avatarId: 'chintu',
+        periodId: WEEKLY_PERIOD,
+        wins: 7,
+        completedLevels: [1, 2, 3],
+        updatedAt: serverTimestamp(),
+      });
+      await adminDb.doc('verifiedMatches/match_a_1').set({
+        matchId: 'match_a_1',
+        uid: PLAYER_A_UID,
+        levelId: 4,
+        playerRole: 'hider',
+        playerWon: true,
+        isOnline: true,
+        verifiedAt: serverTimestamp(),
+      });
+    });
+  });
+
+  it('allows verified players to read top-100 leaderboards and their own verified match records', async () => {
+    await assertSucceeds(
+      dbA().doc(`leaderboards/${ALL_TIME_PERIOD}/entries/${PLAYER_A_UID}`).get(),
+    );
+    await assertSucceeds(
+      dbB().collection(`leaderboards/${ALL_TIME_PERIOD}/entries`).limit(100).get(),
+    );
+    await assertSucceeds(
+      dbC().collection(`leaderboards/${DAILY_PERIOD}/entries`).limit(50).get(),
+    );
+    await assertSucceeds(
+      dbA().collection(`leaderboards/${WEEKLY_PERIOD}/entries`).limit(25).get(),
+    );
+
+    // Owner Player A can read and list own verified matches
+    await assertSucceeds(dbA().doc('verifiedMatches/match_a_1').get());
+    await assertSucceeds(
+      dbA().collection('verifiedMatches').where('uid', '==', PLAYER_A_UID).get(),
+    );
+  });
+
+  it('denies all client score submissions, modifications, deletions, unbounded queries, and cross-user verified match reads', async () => {
+    // Players A, B, C cannot create fake leaderboard entries
+    await assertFails(
+      dbA().doc(`leaderboards/${ALL_TIME_PERIOD}/entries/${PLAYER_A_UID}_fake`).set({
+        uid: PLAYER_A_UID,
+        username: 'PlayerA',
+        avatarId: 'raju',
+        periodId: ALL_TIME_PERIOD,
+        wins: 9999,
+        completedLevels: [1, 2, 3, 4, 5, 6, 7, 8],
+        updatedAt: serverTimestamp(),
+      }),
+    );
+
+    // Players cannot update their own or others' leaderboard wins
+    await assertFails(
+      dbA().doc(`leaderboards/${ALL_TIME_PERIOD}/entries/${PLAYER_A_UID}`).update({
+        wins: 999,
+      }),
+    );
+    await assertFails(
+      dbB().doc(`leaderboards/${ALL_TIME_PERIOD}/entries/${PLAYER_A_UID}`).update({
+        wins: 0,
+      }),
+    );
+
+    // Players cannot delete leaderboard entries
+    await assertFails(
+      dbA().doc(`leaderboards/${ALL_TIME_PERIOD}/entries/${PLAYER_A_UID}`).delete(),
+    );
+    await assertFails(
+      dbC().doc(`leaderboards/${DAILY_PERIOD}/entries/${PLAYER_B_UID}`).delete(),
+    );
+
+    // Players cannot forge, modify, or delete verified match records
+    await assertFails(
+      dbB().doc('verifiedMatches/match_b_fake').set({
+        matchId: 'match_b_fake',
+        uid: PLAYER_B_UID,
+        levelId: 8,
+        playerRole: 'seeker',
+        playerWon: true,
+        isOnline: false,
+        verifiedAt: serverTimestamp(),
+      }),
+    );
+    await assertFails(
+      dbA().doc('verifiedMatches/match_a_1').update({
+        levelId: 8,
+      }),
+    );
+    await assertFails(dbA().doc('verifiedMatches/match_a_1').delete());
+
+    // Player B cannot read or list Player A's verified match records
+    await assertFails(dbB().doc('verifiedMatches/match_a_1').get());
+    await assertFails(
+      dbB().collection('verifiedMatches').where('uid', '==', PLAYER_A_UID).get(),
+    );
+
+    // Unbounded leaderboard list (> 100 or no limit), invalid period, unauthenticated, and unverified reads are denied
+    await assertFails(
+      dbA().collection(`leaderboards/${ALL_TIME_PERIOD}/entries`).get(),
+    );
+    await assertFails(
+      dbA().collection(`leaderboards/${ALL_TIME_PERIOD}/entries`).limit(101).get(),
+    );
+    await assertFails(
+      dbA().collection('leaderboards/invalid_period/entries').limit(10).get(),
+    );
+    await assertFails(
+      dbUnauth().collection(`leaderboards/${ALL_TIME_PERIOD}/entries`).limit(10).get(),
+    );
+    await assertFails(
+      dbUnverified().collection(`leaderboards/${ALL_TIME_PERIOD}/entries`).limit(10).get(),
+    );
+  });
+});
+

@@ -99,10 +99,55 @@ export class VillageAudioEngine {
   private handPumpTimer = 13.5;
   private templeBellTimer = 8.5;
   private announcementTimer = 19.0;
+  private activeLevelId = 1;
+  private schoolBellTimer = 10.5;
+  private schoolChatterTimer = 3.6;
+  private marketChatterTimer = 2.6;
+  private marketHawkerTimer = 5.4;
+  private marketClinkTimer = 4.2;
+  private haveliWindTimer = 2.8;
+  private haveliDoorCreakTimer = 9.5;
+  private haveliFloorCreakTimer = 7.2;
+  private orchardWindTimer = 3.2;
+  private orchardInsectTimer = 2.4;
+  private orchardWaterTimer = 4.2;
+  private trainWhistleTimer = 6.5;
+  private trainRumbleTimer = 11.5;
+  private stationChimeTimer = 14.0;
+  private riverFlowTimer = 2.6;
 
   constructor(onSettingsChanged?: (settings: AudioSettings) => void) {
     this.onSettingsChanged = onSettingsChanged;
     this.bindUnlockListeners();
+  }
+
+  public setActiveLevel(levelId: number): void {
+    this.activeLevelId = levelId;
+    if (levelId === 2) {
+      this.schoolBellTimer = 8.5 + Math.random() * 6.0;
+      this.schoolChatterTimer = 2.4 + Math.random() * 2.5;
+    } else if (levelId === 3) {
+      this.birdTimer = 1.4 + Math.random() * 1.8;
+      this.orchardWindTimer = 2.2 + Math.random() * 2.8;
+      this.orchardInsectTimer = 1.8 + Math.random() * 2.6;
+      this.orchardWaterTimer = 3.0 + Math.random() * 3.2;
+    } else if (levelId === 4) {
+      this.marketChatterTimer = 1.4 + Math.random() * 2.0;
+      this.marketHawkerTimer = 3.2 + Math.random() * 3.5;
+      this.marketClinkTimer = 2.8 + Math.random() * 3.5;
+    } else if (levelId === 5) {
+      this.trainWhistleTimer = 4.2 + Math.random() * 4.8;
+      this.trainRumbleTimer = 9.5 + Math.random() * 7.5;
+      this.stationChimeTimer = 12.0 + Math.random() * 8.0;
+    } else if (levelId === 6) {
+      this.haveliWindTimer = 1.6 + Math.random() * 2.4;
+      this.haveliDoorCreakTimer = 6.5 + Math.random() * 6.0;
+      this.haveliFloorCreakTimer = 5.0 + Math.random() * 6.0;
+    } else if (levelId === 7) {
+      this.riverFlowTimer = 1.2 + Math.random() * 1.6;
+      this.orchardWindTimer = 3.4 + Math.random() * 3.2;
+      this.birdTimer = 1.6 + Math.random() * 2.2;
+    }
   }
 
   public getSettings(): AudioSettings {
@@ -386,6 +431,7 @@ export class VillageAudioEngine {
     listenerZ: number,
     playerAnimState: CharacterAnimState,
     playerMoveSpeed: number,
+    listenerY = 0,
   ): void {
     if (this.disposed || !this.ctx || this.ctx.state !== 'running') return;
 
@@ -393,7 +439,7 @@ export class VillageAudioEngine {
     this.updateVillageAmbience(dt, listenerX, listenerZ);
 
     if (phase === 'playing') {
-      this.updateFootsteps(dt, playerAnimState, playerMoveSpeed);
+      this.updateFootsteps(dt, playerAnimState, playerMoveSpeed, listenerY);
     }
   }
 
@@ -583,6 +629,203 @@ export class VillageAudioEngine {
   private updateVillageAmbience(dt: number, lx: number, lz: number): void {
     if (this.settings.sfxVolume <= 0.001) return;
 
+    // Level 6 (Haunted Haveli): Mysterious abandoned 1990s mansion evening soundscape
+    // — gentle wind gusts, occasional creaking wooden doors & floorboards, soft night crickets.
+    if (this.activeLevelId === 6) {
+      this.haveliWindTimer -= dt;
+      if (this.haveliWindTimer <= 0) {
+        this.haveliWindTimer = 5.5 + Math.random() * 6.5;
+        this.playHaveliWindGust(0.11 + Math.random() * 0.06);
+      }
+
+      this.haveliDoorCreakTimer -= dt;
+      if (this.haveliDoorCreakTimer <= 0) {
+        this.haveliDoorCreakTimer = 11.5 + Math.random() * 12.5;
+        this.playHaveliDoorCreak(0.085 + Math.random() * 0.045);
+      }
+
+      this.haveliFloorCreakTimer -= dt;
+      if (this.haveliFloorCreakTimer <= 0) {
+        this.haveliFloorCreakTimer = 9.0 + Math.random() * 11.0;
+        this.playHaveliWoodCreak(0.07 + Math.random() * 0.04);
+      }
+
+      this.cricketChirpTimer -= dt;
+      if (this.cricketChirpTimer <= 0) {
+        this.cricketChirpTimer = 2.4 + Math.random() * 3.8;
+        this.playCricketTrill(0.032 + Math.random() * 0.02);
+      }
+      return;
+    }
+
+    // Level 3 (Mango Farm): Authentic 1990s Indian orchard soundscape
+    // — lively songbirds & koels, mango-leaf breeze, buzzing orchard insects,
+    //   gentle irrigation channel trickle, courtyard hand pump & farm animals.
+    if (this.activeLevelId === 3) {
+      this.birdTimer -= dt;
+      if (this.birdTimer <= 0) {
+        this.birdTimer = 2.0 + Math.random() * 3.2;
+        if (Math.random() < 0.36) {
+          this.playKoelCall(0.12 + Math.random() * 0.06);
+        } else {
+          this.playBirdChirp(0.11 + Math.random() * 0.06);
+        }
+      }
+
+      this.orchardWindTimer -= dt;
+      if (this.orchardWindTimer <= 0) {
+        this.orchardWindTimer = 5.4 + Math.random() * 6.2;
+        this.playOrchardWindRustle(0.11 + Math.random() * 0.06);
+      }
+
+      this.orchardInsectTimer -= dt;
+      if (this.orchardInsectTimer <= 0) {
+        this.orchardInsectTimer = 2.6 + Math.random() * 3.6;
+        if (Math.random() < 0.55) {
+          this.playOrchardInsects(0.048 + Math.random() * 0.03);
+        } else {
+          this.playCricketTrill(0.036 + Math.random() * 0.024);
+        }
+      }
+
+      this.orchardWaterTimer -= dt;
+      if (this.orchardWaterTimer <= 0) {
+        this.orchardWaterTimer = 4.6 + Math.random() * 4.8;
+        const channelDist = Math.min(
+          Math.abs(lz - 11.2),
+          Math.abs(lz + 24.5),
+          Math.abs(lx + 15.5),
+          Math.abs(lx - 15.5),
+          Math.hypot(lx + 11.5, lz - 7.5),
+        );
+        const waterGain = 0.13 * proximityGain(channelDist, 5, 28);
+        this.playIrrigationTrickle(waterGain);
+      }
+
+      this.handPumpTimer -= dt;
+      if (this.handPumpTimer <= 0) {
+        this.handPumpTimer = 16.0 + Math.random() * 14.0;
+        const pumpDist = Math.hypot(lx - 7.6, lz + 2.2);
+        const gain = 0.2 * proximityGain(pumpDist, 7, 36);
+        this.playHandPump(gain);
+      }
+
+      this.cowTimer -= dt;
+      if (this.cowTimer <= 0) {
+        this.cowTimer = 15.5 + Math.random() * 15.0;
+        this.playCowMoo(0.11 + Math.random() * 0.05);
+      }
+
+      this.dogTimer -= dt;
+      if (this.dogTimer <= 0) {
+        this.dogTimer = 16.0 + Math.random() * 16.0;
+        this.playDistantDogBark(0.085 + Math.random() * 0.045);
+      }
+      return;
+    }
+
+    // Level 5 (Railway Colony): Authentic 1990s Indian Railways residential colony ambience
+    // — distant dual-tone train whistles, passing rail clatter, nostalgic station chimes,
+    //   gentle afternoon birds & colony chatter (strictly atmospheric — no playable trains).
+    if (this.activeLevelId === 5) {
+      const stationDist = Math.hypot(lx, lz + 16.0);
+      const trackProximity = proximityGain(Math.abs(lz + 30.0), 8, 52);
+      const stationProximity = proximityGain(stationDist, 10, 48);
+
+      this.trainWhistleTimer -= dt;
+      if (this.trainWhistleTimer <= 0) {
+        this.trainWhistleTimer = 12.5 + Math.random() * 14.5;
+        this.playDistantTrainWhistle(0.14 * trackProximity);
+      }
+
+      this.trainRumbleTimer -= dt;
+      if (this.trainRumbleTimer <= 0) {
+        this.trainRumbleTimer = 18.0 + Math.random() * 16.0;
+        this.playDistantTrainRumble(0.12 * trackProximity);
+      }
+
+      this.stationChimeTimer -= dt;
+      if (this.stationChimeTimer <= 0) {
+        this.stationChimeTimer = 21.0 + Math.random() * 17.0;
+        this.playRailwayStationChime(0.15 * stationProximity);
+      }
+
+      this.birdTimer -= dt;
+      if (this.birdTimer <= 0) {
+        this.birdTimer = 3.2 + Math.random() * 4.5;
+        if (Math.random() < 0.25) {
+          this.playKoelCall(0.09 + Math.random() * 0.05);
+        } else {
+          this.playBirdChirp(0.08 + Math.random() * 0.05);
+        }
+      }
+
+      this.villagerTimer -= dt;
+      if (this.villagerTimer <= 0) {
+        this.villagerTimer = 7.5 + Math.random() * 9.5;
+        this.playDistantVillagersTalking(0.1 * stationProximity);
+      }
+
+      this.dogTimer -= dt;
+      if (this.dogTimer <= 0) {
+        this.dogTimer = 15.0 + Math.random() * 15.0;
+        this.playDistantDogBark(0.08 + Math.random() * 0.045);
+      }
+      return;
+    }
+
+    // Level 7 (River Village): Natural 1990s riverside village soundscape
+    // — flowing river water & lapping ghats, bamboo breeze, riverside birds & distant village life.
+    if (this.activeLevelId === 7) {
+      const riverDist = Math.max(0, Math.abs(lx) - 5.2);
+      const riverPresence = proximityGain(riverDist, 4, 34);
+
+      this.riverFlowTimer -= dt;
+      if (this.riverFlowTimer <= 0) {
+        this.riverFlowTimer = 3.0 + Math.random() * 2.6;
+        this.playRiverFlow(0.16 * riverPresence);
+      }
+
+      this.orchardWindTimer -= dt;
+      if (this.orchardWindTimer <= 0) {
+        this.orchardWindTimer = 5.8 + Math.random() * 6.5;
+        this.playOrchardWindRustle(0.1 + Math.random() * 0.05);
+      }
+
+      this.birdTimer -= dt;
+      if (this.birdTimer <= 0) {
+        this.birdTimer = 2.2 + Math.random() * 3.4;
+        if (Math.random() < 0.32) {
+          this.playKoelCall(0.11 + Math.random() * 0.06);
+        } else {
+          this.playBirdChirp(0.1 + Math.random() * 0.06);
+        }
+      }
+
+      this.villagerTimer -= dt;
+      if (this.villagerTimer <= 0) {
+        this.villagerTimer = 9.0 + Math.random() * 10.5;
+        this.playDistantVillagersTalking(0.095);
+      }
+
+      this.handPumpTimer -= dt;
+      if (this.handPumpTimer <= 0) {
+        this.handPumpTimer = 16.5 + Math.random() * 14.0;
+        const pumpDist = Math.min(
+          Math.hypot(lx + 23.5, lz - 3.5),
+          Math.hypot(lx - 23.5, lz + 3.5),
+        );
+        this.playHandPump(0.18 * proximityGain(pumpDist, 7, 36));
+      }
+
+      this.cowTimer -= dt;
+      if (this.cowTimer <= 0) {
+        this.cowTimer = 16.0 + Math.random() * 16.0;
+        this.playCowMoo(0.1 + Math.random() * 0.05);
+      }
+      return;
+    }
+
     this.birdTimer -= dt;
     if (this.birdTimer <= 0) {
       this.birdTimer = 2.6 + Math.random() * 4.2;
@@ -652,6 +895,287 @@ export class VillageAudioEngine {
       const gain = 0.12 * proximityGain(d, 12, 50);
       this.playVillageAnnouncement(gain);
     }
+
+    // Nostalgic 1995 Village School Soundscape when on Level 2 (School Campus)
+    if (this.activeLevelId === 2) {
+      this.schoolBellTimer -= dt;
+      if (this.schoolBellTimer <= 0) {
+        this.schoolBellTimer = 18.0 + Math.random() * 16.0;
+        const bellDist = Math.hypot(lx - 11.4, lz - -11.45);
+        const gain = 0.22 * proximityGain(bellDist, 14, 52);
+        this.playSchoolBell(gain);
+      }
+
+      this.schoolChatterTimer -= dt;
+      if (this.schoolChatterTimer <= 0) {
+        this.schoolChatterTimer = 5.2 + Math.random() * 5.8;
+        const yardDist = Math.hypot(lx - 0, lz - -4);
+        const gain = 0.14 * proximityGain(yardDist, 16, 48);
+        this.playSchoolChildrenTalking(gain);
+      }
+    }
+
+    // Lively 1990s Indian Village Bazaar Soundscape when on Level 4 (Old Market)
+    if (this.activeLevelId === 4) {
+      const bazaarDist = Math.hypot(lx, lz);
+      const presence = proximityGain(bazaarDist, 22, 58);
+
+      this.marketChatterTimer -= dt;
+      if (this.marketChatterTimer <= 0) {
+        this.marketChatterTimer = 3.2 + Math.random() * 3.8;
+        this.playMarketChatter(0.14 * presence);
+      }
+
+      this.marketHawkerTimer -= dt;
+      if (this.marketHawkerTimer <= 0) {
+        this.marketHawkerTimer = 6.8 + Math.random() * 7.2;
+        this.playMarketVendorCall(0.15 * presence);
+      }
+
+      this.marketClinkTimer -= dt;
+      if (this.marketClinkTimer <= 0) {
+        this.marketClinkTimer = 5.5 + Math.random() * 6.5;
+        this.playBazaarClink(0.08 * presence);
+      }
+    }
+  }
+
+  /** Gentle warm afternoon wind rustling through mango tree leaves */
+  private playOrchardWindRustle(volume: number): void {
+    if (!this.ctx || !this.ambienceGain || !this.pinkNoise) return;
+    const now = this.ctx.currentTime;
+    const dur = 2.6 + Math.random() * 1.4;
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.pinkNoise;
+    src.loop = true;
+
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(520, now);
+    bp.frequency.linearRampToValueAtTime(1180 + Math.random() * 280, now + dur * 0.45);
+    bp.frequency.exponentialRampToValueAtTime(480, now + dur);
+    bp.Q.value = 1.4;
+
+    const env = this.ctx.createGain();
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(volume, now + dur * 0.36);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+    src.connect(bp);
+    bp.connect(env);
+    env.connect(this.ambienceGain);
+    src.start(now, Math.random() * 0.9);
+    src.stop(now + dur + 0.05);
+  }
+
+  /** Warm daytime orchard cicada / buzzing insect hum */
+  private playOrchardInsects(volume: number): void {
+    if (!this.ctx || !this.ambienceGain) return;
+    const now = this.ctx.currentTime;
+    const dur = 1.15 + Math.random() * 0.75;
+    const baseFreq = 5100 + Math.random() * 900;
+
+    const carrier = this.ctx.createOscillator();
+    carrier.type = 'sine';
+    carrier.frequency.setValueAtTime(baseFreq, now);
+
+    const mod = this.ctx.createOscillator();
+    mod.type = 'sine';
+    mod.frequency.setValueAtTime(24 + Math.random() * 14, now);
+    const modGain = this.ctx.createGain();
+    modGain.gain.value = volume * 0.45;
+
+    const env = this.ctx.createGain();
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(volume, now + 0.2);
+    env.gain.setValueAtTime(volume * 0.85, now + dur * 0.72);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+    mod.connect(modGain);
+    modGain.connect(env.gain);
+    carrier.connect(env);
+    env.connect(this.ambienceGain);
+
+    carrier.start(now);
+    mod.start(now);
+    carrier.stop(now + dur + 0.04);
+    mod.stop(now + dur + 0.04);
+  }
+
+  /** Soft trickling water running through earthen orchard irrigation channels */
+  private playIrrigationTrickle(volume: number): void {
+    if (!this.ctx || !this.ambienceGain || !this.whiteNoise) return;
+    const now = this.ctx.currentTime;
+    const dur = 1.8 + Math.random() * 0.9;
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.whiteNoise;
+    src.loop = true;
+
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(1450, now);
+    bp.frequency.linearRampToValueAtTime(2200, now + dur * 0.5);
+    bp.frequency.linearRampToValueAtTime(1320, now + dur);
+    bp.Q.value = 3.2;
+
+    const env = this.ctx.createGain();
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(volume * 0.55, now + 0.3);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+    src.connect(bp);
+    bp.connect(env);
+    env.connect(this.ambienceGain);
+    src.start(now, Math.random() * 0.8);
+    src.stop(now + dur + 0.04);
+  }
+
+  /** Classic 1990s Indian Railways distant dual-tone locomotive horn/whistle */
+  private playDistantTrainWhistle(volume: number): void {
+    if (!this.ctx || !this.ambienceGain) return;
+    const now = this.ctx.currentTime;
+    // Iconic warm dual-tone railway horn chord (F#4 + A#4 / distant muted brassy timbre)
+    const freqs = Math.random() < 0.5 ? [369.99, 466.16] : [329.63, 415.3];
+    const blasts = Math.random() < 0.6 ? [0.0, 1.45] : [0.0];
+
+    for (let b = 0; b < blasts.length; b++) {
+      const start = now + blasts[b];
+      const dur = b === 0 ? 1.15 : 1.55;
+      const lp = this.ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.setValueAtTime(920, start);
+      lp.frequency.exponentialRampToValueAtTime(640, start + dur);
+
+      const env = this.ctx.createGain();
+      env.gain.setValueAtTime(0.0001, start);
+      env.gain.linearRampToValueAtTime(volume, start + 0.18);
+      env.gain.setValueAtTime(volume * 0.9, start + dur * 0.68);
+      env.gain.exponentialRampToValueAtTime(0.0001, start + dur);
+
+      lp.connect(env);
+      env.connect(this.ambienceGain);
+      if (this.delayNode) env.connect(this.delayNode);
+
+      for (const f of freqs) {
+        const osc = this.ctx.createOscillator();
+        osc.type = 'sawtooth';
+        osc.frequency.setValueAtTime(f * 0.992, start);
+        osc.frequency.linearRampToValueAtTime(f, start + 0.12);
+        osc.frequency.linearRampToValueAtTime(f * 0.985, start + dur);
+        osc.connect(lp);
+        osc.start(start);
+        osc.stop(start + dur + 0.05);
+      }
+    }
+  }
+
+  /** Soft rhythmic distant train clackety-clack & low passing track rumble */
+  private playDistantTrainRumble(volume: number): void {
+    if (!this.ctx || !this.ambienceGain || !this.pinkNoise) return;
+    const now = this.ctx.currentTime;
+    const dur = 4.2;
+
+    // Warm distant low rumble bed
+    const bed = this.ctx.createBufferSource();
+    bed.buffer = this.pinkNoise;
+    bed.loop = true;
+    const lp = this.ctx.createBiquadFilter();
+    lp.type = 'lowpass';
+    lp.frequency.value = 260;
+    const bedEnv = this.ctx.createGain();
+    bedEnv.gain.setValueAtTime(0.0001, now);
+    bedEnv.gain.linearRampToValueAtTime(volume * 0.85, now + 1.4);
+    bedEnv.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+    bed.connect(lp);
+    lp.connect(bedEnv);
+    bedEnv.connect(this.ambienceGain);
+    bed.start(now, Math.random() * 0.6);
+    bed.stop(now + dur + 0.05);
+
+    // Subtle "da-dum... da-dum..." rail joint clacks
+    for (let i = 0; i < 6; i++) {
+      const pairT = now + 0.45 + i * 0.56;
+      const pairFade = Math.sin(((i + 0.5) / 6) * Math.PI);
+      for (const dtClick of [0, 0.14]) {
+        const t = pairT + dtClick;
+        const click = this.ctx.createOscillator();
+        click.type = 'triangle';
+        click.frequency.setValueAtTime(165, t);
+        click.frequency.exponentialRampToValueAtTime(72, t + 0.055);
+        const cEnv = this.ctx.createGain();
+        cEnv.gain.setValueAtTime(0.0001, t);
+        cEnv.gain.linearRampToValueAtTime(volume * 0.48 * pairFade, t + 0.006);
+        cEnv.gain.exponentialRampToValueAtTime(0.0001, t + 0.065);
+        click.connect(cEnv);
+        cEnv.connect(this.ambienceGain);
+        click.start(t);
+        click.stop(t + 0.075);
+      }
+    }
+  }
+
+  /** Classic nostalgic 3-note Indian Railways Station Announcement Chime ("Ding-Dong-Ding") */
+  private playRailwayStationChime(volume: number): void {
+    if (!this.ctx || !this.ambienceGain) return;
+    const now = this.ctx.currentTime;
+    const notes = [659.25, 523.25, 783.99]; // E5 -> C5 -> G5 classic railway PA chime
+
+    for (let i = 0; i < notes.length; i++) {
+      const t = now + i * 0.34;
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(notes[i], t);
+
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.value = 1150;
+      bp.Q.value = 1.6;
+
+      const env = this.ctx.createGain();
+      env.gain.setValueAtTime(0.0001, t);
+      env.gain.linearRampToValueAtTime(volume * 0.52, t + 0.015);
+      env.gain.exponentialRampToValueAtTime(0.0001, t + 0.65);
+
+      osc.connect(bp);
+      bp.connect(env);
+      env.connect(this.ambienceGain);
+      if (this.delayNode) env.connect(this.delayNode);
+
+      osc.start(t);
+      osc.stop(t + 0.7);
+    }
+  }
+
+  /** Natural gently flowing river water & soft riverbank lapping */
+  private playRiverFlow(volume: number): void {
+    if (!this.ctx || !this.ambienceGain || !this.pinkNoise) return;
+    const now = this.ctx.currentTime;
+    const dur = 3.6 + Math.random() * 1.4;
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.pinkNoise;
+    src.loop = true;
+
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(680, now);
+    bp.frequency.linearRampToValueAtTime(1120 + Math.random() * 240, now + dur * 0.5);
+    bp.frequency.linearRampToValueAtTime(620, now + dur);
+    bp.Q.value = 1.1;
+
+    const env = this.ctx.createGain();
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(volume, now + dur * 0.35);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+    src.connect(bp);
+    bp.connect(env);
+    env.connect(this.ambienceGain);
+    src.start(now, Math.random() * 0.8);
+    src.stop(now + dur + 0.05);
   }
 
   private playBirdChirp(volume: number): void {
@@ -972,6 +1496,187 @@ export class VillageAudioEngine {
   }
 
   /**
+   * Player-triggered loud, resonant brass Temple Bell (Mandir Ghanta) SFX
+   * with metallic clapper strike transient and courtyard echo.
+   */
+  public playTempleBellRing(volume = 0.68): void {
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+    const pitchJitter = 0.985 + Math.random() * 0.03;
+    const fundamental = 412 * pitchJitter;
+
+    // 1. Crisp metallic brass clapper impact strike
+    const strikeOsc = this.ctx.createOscillator();
+    strikeOsc.type = 'triangle';
+    strikeOsc.frequency.setValueAtTime(1640 * pitchJitter, now);
+    strikeOsc.frequency.exponentialRampToValueAtTime(760 * pitchJitter, now + 0.055);
+    const strikeGain = this.ctx.createGain();
+    strikeGain.gain.setValueAtTime(0.0001, now);
+    strikeGain.gain.linearRampToValueAtTime(volume * 0.42, now + 0.004);
+    strikeGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
+    strikeOsc.connect(strikeGain);
+    strikeGain.connect(this.sfxGain);
+    strikeOsc.start(now);
+    strikeOsc.stop(now + 0.09);
+
+    // 2. Rich bronze bell harmonic partials (authentic Mandir Ghanta shimmer)
+    const ratios = [1.0, 2.0, 2.756, 4.07, 5.404, 6.72];
+    const decays = [3.6, 2.7, 2.0, 1.35, 0.9, 0.55];
+
+    for (let i = 0; i < ratios.length; i++) {
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(fundamental * ratios[i], now);
+
+      const env = this.ctx.createGain();
+      const gainLevel = volume * (i === 0 ? 0.58 : 0.36 / (i + 0.45));
+      env.gain.setValueAtTime(0.0001, now);
+      env.gain.linearRampToValueAtTime(gainLevel, now + 0.007);
+      env.gain.exponentialRampToValueAtTime(0.0001, now + decays[i]);
+
+      osc.connect(env);
+      env.connect(this.sfxGain);
+      if (this.delayNode && i < 3) {
+        const echoSend = this.ctx.createGain();
+        echoSend.gain.value = 0.42;
+        env.connect(echoSend);
+        echoSend.connect(this.delayNode);
+      }
+
+      osc.start(now);
+      osc.stop(now + decays[i] + 0.06);
+    }
+  }
+
+  /**
+   * Authentic 1995 Indian village school period bell (3 rhythmic metallic brass/iron strikes)
+   */
+  public playSchoolBell(volume = 0.2): void {
+    if (!this.ctx || !this.ambienceGain || volume <= 0.005) return;
+    const now = this.ctx.currentTime;
+    const fundamental = 640; // Brighter village school ghanti pitch
+    const ratios = [1.0, 2.02, 2.94, 4.18, 5.6];
+    const decays = [1.65, 1.2, 0.85, 0.55, 0.35];
+
+    for (let strike = 0; strike < 3; strike++) {
+      const t0 = now + strike * 0.42;
+      const strikeVol = volume * (strike === 2 ? 1.05 : 0.88);
+      for (let i = 0; i < ratios.length; i++) {
+        const osc = this.ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(fundamental * ratios[i], t0);
+
+        const env = this.ctx.createGain();
+        const level = strikeVol * (i === 0 ? 0.5 : 0.32 / (i + 0.4));
+        env.gain.setValueAtTime(0.0001, t0);
+        env.gain.linearRampToValueAtTime(level, t0 + 0.006);
+        env.gain.exponentialRampToValueAtTime(0.0001, t0 + decays[i]);
+
+        osc.connect(env);
+        env.connect(this.ambienceGain);
+        if (this.delayNode && i < 2) env.connect(this.delayNode);
+        osc.start(t0);
+        osc.stop(t0 + decays[i] + 0.05);
+      }
+    }
+  }
+
+  /**
+   * Player-triggered crisp double-clang School Bell SFX under the veranda corridor
+   */
+  public playSchoolBellRing(volume = 0.72): void {
+    if (!this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+    const jitter = 0.985 + Math.random() * 0.03;
+    const fundamental = 635 * jitter;
+    const ratios = [1.0, 2.01, 2.93, 4.16, 5.58, 7.05];
+    const decays = [2.4, 1.8, 1.25, 0.85, 0.55, 0.32];
+
+    for (let strike = 0; strike < 2; strike++) {
+      const t0 = now + strike * 0.28;
+      const strikeOsc = this.ctx.createOscillator();
+      strikeOsc.type = 'triangle';
+      strikeOsc.frequency.setValueAtTime(2180 * jitter, t0);
+      strikeOsc.frequency.exponentialRampToValueAtTime(980 * jitter, t0 + 0.045);
+      const strikeGain = this.ctx.createGain();
+      strikeGain.gain.setValueAtTime(0.0001, t0);
+      strikeGain.gain.linearRampToValueAtTime(volume * 0.36, t0 + 0.003);
+      strikeGain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.065);
+      strikeOsc.connect(strikeGain);
+      strikeGain.connect(this.sfxGain);
+      strikeOsc.start(t0);
+      strikeOsc.stop(t0 + 0.08);
+
+      for (let i = 0; i < ratios.length; i++) {
+        const osc = this.ctx.createOscillator();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(fundamental * ratios[i], t0);
+        const env = this.ctx.createGain();
+        const level = volume * (strike === 0 ? 1.0 : 0.78) * (i === 0 ? 0.54 : 0.34 / (i + 0.4));
+        env.gain.setValueAtTime(0.0001, t0);
+        env.gain.linearRampToValueAtTime(level, t0 + 0.005);
+        env.gain.exponentialRampToValueAtTime(0.0001, t0 + decays[i]);
+
+        osc.connect(env);
+        env.connect(this.sfxGain);
+        if (this.delayNode && i < 3) {
+          const echoSend = this.ctx.createGain();
+          echoSend.gain.value = 0.38;
+          env.connect(echoSend);
+          echoSend.connect(this.delayNode);
+        }
+        osc.start(t0);
+        osc.stop(t0 + decays[i] + 0.06);
+      }
+    }
+  }
+
+  /**
+   * Lively procedural schoolyard children talking, reciting, & recess chatter bursts
+   */
+  private playSchoolChildrenTalking(volume: number): void {
+    if (!this.ctx || !this.ambienceGain || volume <= 0.004) return;
+    const now = this.ctx.currentTime;
+    const voiceCount = 3 + Math.floor(Math.random() * 3);
+
+    for (let v = 0; v < voiceCount; v++) {
+      const startOffset = v * (0.14 + Math.random() * 0.22);
+      const syllables = 3 + Math.floor(Math.random() * 4);
+      const childPitch = 285 + Math.random() * 145; // Bright children's vocal register
+
+      for (let s = 0; s < syllables; s++) {
+        const t = now + startOffset + s * (0.13 + Math.random() * 0.07);
+        const dur = 0.085 + Math.random() * 0.065;
+        const osc = this.ctx.createOscillator();
+        osc.type = 'sawtooth';
+        const f0 = childPitch * (0.9 + Math.random() * 0.24);
+        osc.frequency.setValueAtTime(f0, t);
+        osc.frequency.exponentialRampToValueAtTime(
+          f0 * (0.86 + Math.random() * 0.32),
+          t + dur,
+        );
+
+        const formant = this.ctx.createBiquadFilter();
+        formant.type = 'bandpass';
+        formant.frequency.value = 950 + Math.random() * 820;
+        formant.Q.value = 3.2;
+
+        const env = this.ctx.createGain();
+        const peak = volume * (0.28 + Math.random() * 0.24);
+        env.gain.setValueAtTime(0.0001, t);
+        env.gain.linearRampToValueAtTime(peak, t + 0.018);
+        env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+        osc.connect(formant);
+        formant.connect(env);
+        env.connect(this.ambienceGain);
+        osc.start(t);
+        osc.stop(t + dur + 0.03);
+      }
+    }
+  }
+
+  /**
    * Nostalgic 1990s Indian Village Horn-Loudspeaker / Megaphone Announcement
    * (Panchayat / Bazaar PA chime + bandpass-filtered distant announcement cadence)
    */
@@ -1058,12 +1763,232 @@ export class VillageAudioEngine {
   }
 
   // ---------------------------------------------------------------------------
+  // Level 4 Old Market Atmospheric Sounds (Bazaar Chatter & Vendor Calls)
+  // ---------------------------------------------------------------------------
+  private playMarketChatter(volume: number): void {
+    if (!this.ctx || !this.ambienceGain || volume < 0.005) return;
+    const now = this.ctx.currentTime;
+    const voices = 2 + Math.floor(Math.random() * 2);
+
+    for (let v = 0; v < voices; v++) {
+      let t = now + v * (0.16 + Math.random() * 0.24);
+      const basePitch = 140 + Math.random() * 145;
+      const syllables = 4 + Math.floor(Math.random() * 4);
+
+      for (let i = 0; i < syllables; i++) {
+        const dur = 0.08 + Math.random() * 0.08;
+        const osc = this.ctx.createOscillator();
+        osc.type = v % 2 === 0 ? 'triangle' : 'sawtooth';
+        const p = basePitch * (0.9 + Math.random() * 0.22);
+        osc.frequency.setValueAtTime(p, t);
+        osc.frequency.linearRampToValueAtTime(p * (0.96 + Math.random() * 0.12), t + dur);
+
+        const bp = this.ctx.createBiquadFilter();
+        bp.type = 'bandpass';
+        bp.frequency.value = 540 + Math.random() * 480;
+        bp.Q.value = 2.6;
+
+        const env = this.ctx.createGain();
+        env.gain.setValueAtTime(0.0001, t);
+        env.gain.linearRampToValueAtTime(volume * 0.55, t + 0.018);
+        env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+        osc.connect(bp);
+        bp.connect(env);
+        env.connect(this.ambienceGain);
+        osc.start(t);
+        osc.stop(t + dur + 0.02);
+        t += dur + 0.04 + Math.random() * 0.05;
+      }
+    }
+  }
+
+  /** Melodic 1990s Indian shopkeeper / sabzi-vendor call cadence to passing shoppers */
+  private playMarketVendorCall(volume: number): void {
+    if (!this.ctx || !this.ambienceGain || volume < 0.005) return;
+    const now = this.ctx.currentTime;
+
+    // Characteristic sing-song 4-syllable Indian market hawker contour (e.g. "Taaza sabzi le lo!")
+    const base = 175 + Math.random() * 55;
+    const ratios = Math.random() < 0.5 ? [1.0, 1.18, 1.32, 1.12] : [1.15, 1.34, 1.24, 0.96];
+    const durs = [0.16, 0.14, 0.24, 0.34];
+    let t = now;
+
+    for (let i = 0; i < ratios.length; i++) {
+      const dur = durs[i];
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sawtooth';
+      const fStart = base * ratios[i];
+      osc.frequency.setValueAtTime(fStart, t);
+      osc.frequency.linearRampToValueAtTime(
+        fStart * (i === ratios.length - 1 ? 0.88 : 1.07),
+        t + dur,
+      );
+
+      const formant = this.ctx.createBiquadFilter();
+      formant.type = 'bandpass';
+      formant.frequency.setValueAtTime(860 + i * 110, t);
+      formant.Q.value = 3.2;
+
+      const lp = this.ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 1750;
+
+      const env = this.ctx.createGain();
+      env.gain.setValueAtTime(0.0001, t);
+      env.gain.linearRampToValueAtTime(volume * (i === 2 ? 1.1 : 0.85), t + 0.03);
+      env.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+
+      osc.connect(formant);
+      formant.connect(lp);
+      lp.connect(env);
+      env.connect(this.ambienceGain);
+      if (this.delayNode) env.connect(this.delayNode);
+
+      osc.start(t);
+      osc.stop(t + dur + 0.04);
+      t += dur + 0.055;
+    }
+  }
+
+  /** Subtle brass weighing-scale pan / stainless-steel chai cup clink */
+  private playBazaarClink(volume: number): void {
+    if (!this.ctx || !this.ambienceGain || volume < 0.004) return;
+    const now = this.ctx.currentTime;
+    const strikes = Math.random() < 0.5 ? 2 : 3;
+
+    for (let i = 0; i < strikes; i++) {
+      const t = now + i * (0.11 + Math.random() * 0.06);
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(2100 + Math.random() * 680, t);
+
+      const env = this.ctx.createGain();
+      env.gain.setValueAtTime(0.0001, t);
+      env.gain.linearRampToValueAtTime(volume, t + 0.006);
+      env.gain.exponentialRampToValueAtTime(0.0001, t + 0.14);
+
+      osc.connect(env);
+      env.connect(this.ambienceGain);
+      osc.start(t);
+      osc.stop(t + 0.16);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Level 6 Haunted Haveli Atmospheric Sounds (Wind, Creaking Doors & Wood Floors)
+  // ---------------------------------------------------------------------------
+  private playHaveliWindGust(volume: number): void {
+    if (!this.ctx || !this.ambienceGain || !this.pinkNoise) return;
+    const now = this.ctx.currentTime;
+    const dur = 3.6 + Math.random() * 2.2;
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.pinkNoise;
+    src.loop = true;
+
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    const startFreq = 260 + Math.random() * 120;
+    bp.frequency.setValueAtTime(startFreq, now);
+    bp.frequency.exponentialRampToValueAtTime(startFreq * 1.95, now + dur * 0.45);
+    bp.frequency.exponentialRampToValueAtTime(startFreq * 0.85, now + dur);
+    bp.Q.value = 3.2;
+
+    const env = this.ctx.createGain();
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(volume, now + dur * 0.38);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+    src.connect(bp);
+    bp.connect(env);
+    env.connect(this.ambienceGain);
+    src.start(now, Math.random() * 1.5, dur + 0.08);
+    src.stop(now + dur + 0.1);
+  }
+
+  private playHaveliDoorCreak(volume: number): void {
+    if (!this.ctx || !this.ambienceGain) return;
+    const now = this.ctx.currentTime;
+    const dur = 0.85 + Math.random() * 0.55;
+
+    const osc = this.ctx.createOscillator();
+    osc.type = 'sawtooth';
+    const base = 185 + Math.random() * 95;
+    osc.frequency.setValueAtTime(base, now);
+    osc.frequency.exponentialRampToValueAtTime(base * 1.48, now + dur * 0.42);
+    osc.frequency.exponentialRampToValueAtTime(base * 0.92, now + dur);
+
+    // Subtle hinge stick-slip modulation
+    const lfo = this.ctx.createOscillator();
+    lfo.type = 'sine';
+    lfo.frequency.value = 18 + Math.random() * 10;
+    const lfoGain = this.ctx.createGain();
+    lfoGain.gain.value = 14;
+    lfo.connect(lfoGain);
+    lfoGain.connect(osc.frequency);
+
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 720 + Math.random() * 260;
+    bp.Q.value = 5.5;
+
+    const env = this.ctx.createGain();
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(volume, now + 0.14);
+    env.gain.linearRampToValueAtTime(volume * 0.65, now + dur * 0.72);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+    osc.connect(bp);
+    bp.connect(env);
+    env.connect(this.ambienceGain);
+    if (this.delayNode) env.connect(this.delayNode);
+
+    osc.start(now);
+    lfo.start(now);
+    osc.stop(now + dur + 0.05);
+    lfo.stop(now + dur + 0.05);
+  }
+
+  private playHaveliWoodCreak(volume: number, dest?: AudioNode | null): void {
+    if (!this.ctx) return;
+    const out = dest ?? this.ambienceGain;
+    if (!out) return;
+    const now = this.ctx.currentTime;
+    const dur = 0.24 + Math.random() * 0.18;
+
+    const osc = this.ctx.createOscillator();
+    osc.type = 'triangle';
+    const p = 135 + Math.random() * 75;
+    osc.frequency.setValueAtTime(p, now);
+    osc.frequency.exponentialRampToValueAtTime(p * 1.32, now + dur * 0.5);
+    osc.frequency.exponentialRampToValueAtTime(p * 0.78, now + dur);
+
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = 460;
+    bp.Q.value = 4.2;
+
+    const env = this.ctx.createGain();
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(volume, now + 0.03);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + dur);
+
+    osc.connect(bp);
+    bp.connect(env);
+    env.connect(out);
+    osc.start(now);
+    osc.stop(now + dur + 0.04);
+  }
+
+  // ---------------------------------------------------------------------------
   // 2. Dynamic Footsteps (Walking vs Running vs Sneaking)
   // ---------------------------------------------------------------------------
   private updateFootsteps(
     dt: number,
     animState: CharacterAnimState,
     moveSpeed: number,
+    listenerY = 0,
   ): void {
     if (
       moveSpeed < 0.2 ||
@@ -1080,22 +2005,28 @@ export class VillageAudioEngine {
 
     if (animState === 'run') {
       this.footstepTimer = 0.27;
-      this.playFootstep('run', this.stepToggle);
+      this.playFootstep('run', this.stepToggle, listenerY);
     } else if (animState === 'sneak') {
       this.footstepTimer = 0.54;
-      this.playFootstep('sneak', this.stepToggle);
+      this.playFootstep('sneak', this.stepToggle, listenerY);
     } else {
       this.footstepTimer = 0.42;
-      this.playFootstep('walk', this.stepToggle);
+      this.playFootstep('walk', this.stepToggle, listenerY);
     }
   }
 
-  private playFootstep(mode: 'walk' | 'run' | 'sneak', alt: boolean): void {
+  private playFootstep(
+    mode: 'walk' | 'run' | 'sneak',
+    alt: boolean,
+    listenerY = 0,
+  ): void {
     if (!this.ctx || !this.sfxGain || !this.pinkNoise) return;
     const now = this.ctx.currentTime;
     const pitchJitter = alt ? 1.06 : 0.94;
+    const inHaveli = this.activeLevelId === 6;
+    const onWoodBalcony = inHaveli && listenerY >= 2.2 && listenerY < 5.4;
 
-    // 1. Dusty dirt scuff texture
+    // 1. Dusty dirt / hollow haveli stone or wood scuff texture
     const noise = this.ctx.createBufferSource();
     noise.buffer = this.pinkNoise;
 
@@ -1104,8 +2035,8 @@ export class VillageAudioEngine {
     const nEnv = this.ctx.createGain();
 
     if (mode === 'run') {
-      filter.frequency.setValueAtTime(1750 * pitchJitter, now);
-      filter.Q.value = 1.2;
+      filter.frequency.setValueAtTime((inHaveli ? 1480 : 1750) * pitchJitter, now);
+      filter.Q.value = inHaveli ? 1.6 : 1.2;
       nEnv.gain.setValueAtTime(0.0001, now);
       nEnv.gain.linearRampToValueAtTime(0.28, now + 0.01);
       nEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.095);
@@ -1116,8 +2047,8 @@ export class VillageAudioEngine {
       nEnv.gain.linearRampToValueAtTime(0.075, now + 0.02);
       nEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
     } else {
-      filter.frequency.setValueAtTime(1250 * pitchJitter, now);
-      filter.Q.value = 1.4;
+      filter.frequency.setValueAtTime((inHaveli ? 1080 : 1250) * pitchJitter, now);
+      filter.Q.value = inHaveli ? 1.8 : 1.4;
       nEnv.gain.setValueAtTime(0.0001, now);
       nEnv.gain.linearRampToValueAtTime(0.17, now + 0.012);
       nEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.078);
@@ -1126,18 +2057,21 @@ export class VillageAudioEngine {
     noise.connect(filter);
     filter.connect(nEnv);
     nEnv.connect(this.sfxGain);
+    if (inHaveli && this.delayNode && mode !== 'sneak') {
+      nEnv.connect(this.delayNode);
+    }
     noise.start(now, Math.random() * 1.5, 0.12);
 
-    // 2. Ground heel thump body
+    // 2. Ground heel thump body (deeper wooden resonance on upper Haveli balconies)
     const thump = this.ctx.createOscillator();
-    thump.type = 'sine';
+    thump.type = onWoodBalcony ? 'triangle' : 'sine';
     const tEnv = this.ctx.createGain();
     if (mode === 'run') {
-      thump.frequency.setValueAtTime(132 * pitchJitter, now);
-      thump.frequency.exponentialRampToValueAtTime(52, now + 0.07);
+      thump.frequency.setValueAtTime((onWoodBalcony ? 155 : 132) * pitchJitter, now);
+      thump.frequency.exponentialRampToValueAtTime(52, now + 0.075);
       tEnv.gain.setValueAtTime(0.0001, now);
       tEnv.gain.linearRampToValueAtTime(0.22, now + 0.006);
-      tEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
+      tEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.085);
     } else if (mode === 'sneak') {
       thump.frequency.setValueAtTime(78 * pitchJitter, now);
       thump.frequency.exponentialRampToValueAtTime(48, now + 0.055);
@@ -1145,16 +2079,24 @@ export class VillageAudioEngine {
       tEnv.gain.linearRampToValueAtTime(0.055, now + 0.01);
       tEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
     } else {
-      thump.frequency.setValueAtTime(102 * pitchJitter, now);
-      thump.frequency.exponentialRampToValueAtTime(50, now + 0.06);
+      thump.frequency.setValueAtTime((onWoodBalcony ? 124 : 102) * pitchJitter, now);
+      thump.frequency.exponentialRampToValueAtTime(50, now + 0.065);
       tEnv.gain.setValueAtTime(0.0001, now);
       tEnv.gain.linearRampToValueAtTime(0.13, now + 0.008);
-      tEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.07);
+      tEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
     }
     thump.connect(tEnv);
     tEnv.connect(this.sfxGain);
     thump.start(now);
-    thump.stop(now + 0.09);
+    thump.stop(now + 0.095);
+
+    // 3. Occasional subtle wooden floorboard creak when moving on Haveli wooden floors
+    if (inHaveli && mode !== 'sneak') {
+      const creakChance = onWoodBalcony ? 0.28 : 0.09;
+      if (Math.random() < creakChance) {
+        this.playHaveliWoodCreak(mode === 'run' ? 0.11 : 0.07, this.sfxGain);
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -1334,6 +2276,45 @@ export class VillageAudioEngine {
       star.start(t);
       star.stop(t + 0.2);
     }
+  }
+
+  /** Playful comedic slap pop when one hider slaps another nearby hider */
+  public playHiderSlap(): void {
+    if (!this.ensureReady() || !this.ctx || !this.sfxGain) return;
+    const now = this.ctx.currentTime;
+
+    // 1. Crisp hand-clap / slap transient
+    if (this.whiteNoise) {
+      const slap = this.ctx.createBufferSource();
+      slap.buffer = this.whiteNoise;
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(2100, now);
+      bp.frequency.exponentialRampToValueAtTime(950, now + 0.085);
+      bp.Q.value = 1.25;
+      const sEnv = this.ctx.createGain();
+      sEnv.gain.setValueAtTime(0.0001, now);
+      sEnv.gain.linearRampToValueAtTime(0.52, now + 0.004);
+      sEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.095);
+      slap.connect(bp);
+      bp.connect(sEnv);
+      sEnv.connect(this.sfxGain);
+      slap.start(now, Math.random() * 0.8, 0.11);
+    }
+
+    // 2. Quick playful "thwack-pop" pitch drop
+    const pop = this.ctx.createOscillator();
+    pop.type = 'triangle';
+    pop.frequency.setValueAtTime(340, now);
+    pop.frequency.exponentialRampToValueAtTime(145, now + 0.09);
+    const pEnv = this.ctx.createGain();
+    pEnv.gain.setValueAtTime(0.0001, now);
+    pEnv.gain.linearRampToValueAtTime(0.28, now + 0.006);
+    pEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.11);
+    pop.connect(pEnv);
+    pEnv.connect(this.sfxGain);
+    pop.start(now);
+    pop.stop(now + 0.12);
   }
 
   /** Celebratory 1990s Indian bansuri + brass chime victory fanfare (or gentle defeat cadence) */

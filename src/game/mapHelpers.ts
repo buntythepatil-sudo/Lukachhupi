@@ -9,6 +9,7 @@ import {
   MinimapLandmark,
   MinimapRoad,
   MinimapWaterRect,
+  SeatSpot,
 } from './types';
 
 export interface MapBuildContext {
@@ -23,6 +24,7 @@ export interface MapBuildContext {
   waterRects: MinimapWaterRect[];
   buildings: MinimapBuilding[];
   landmarks: MinimapLandmark[];
+  seats: SeatSpot[];
   pondWater: THREE.Mesh | null;
   _boxGeoCache?: Map<string, THREE.BoxGeometry>;
 }
@@ -58,6 +60,7 @@ export function createMapContext(): MapBuildContext {
     waterRects: [],
     buildings: [],
     landmarks: [],
+    seats: [],
     pondWater: null,
   };
 }

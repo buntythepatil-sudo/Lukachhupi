@@ -50,12 +50,17 @@ import {
   MinimapActorDot,
   MinimapFrame,
   ParticipantSummary,
+  SeatSpot,
   SeekerMode,
+  SpectateCameraMode,
+  SpectateTargetInfo,
   TeamRole,
+  TempleBellInteractive,
   VillageColliders,
   VillageMinimapLayout,
 } from './types';
 import { VILLAGE_MINIMAP_LAYOUT, VillageBuildResult } from './village';
+import { VillageNpcSystem } from './villageNpcSystem';
 
 const MATCH_DURATION_SECONDS = 180; // 3-minute match
 const HEADSTART_SECONDS = 12.0; // Head-start while seeker counts with eyes closed
@@ -71,6 +76,14 @@ const SEEKER_PATROL_SPEED = 2.95;
 const SEEKER_CHASE_SPEED = 4.35;
 
 const TAG_RANGE = 3.25;
+const SLAP_RANGE = 2.75;
+const HIDER_SLAP_COOLDOWN = 1.6;
+const HANDSHAKE_RANGE = 3.2;
+const HANDSHAKE_DURATION = 1.75;
+const HANDSHAKE_COOLDOWN = 2.0;
+const SIT_RANGE = 2.45;
+const SIT_DOWN_DURATION = 0.45;
+const STAND_UP_DURATION = 0.42;
 const AI_CATCH_RANGE = 1.3;
 const SIGHT_RANGE_STANDING = 14.5;
 const SIGHT_RANGE_HIDING = 4.6;
@@ -107,6 +120,7 @@ const _lookGoal = new THREE.Vector3();
 const _currentLook = new THREE.Vector3();
 const _toTarget = new THREE.Vector3();
 const _probePos = new THREE.Vector3();
+const _freeCamPos = new THREE.Vector3();
 const _rayStart = new THREE.Vector2();
 const _rayEnd = new THREE.Vector2();
 
@@ -133,18 +147,33 @@ interface ParticipantActor {
   remoteTargetZ?: number;
   remoteTargetRotY?: number;
   remoteAnimState?: CharacterAnimState;
+  remoteExpression?: FacialExpression;
+  remoteAnimElapsed?: number;
   nameplateSprite?: THREE.Sprite | null;
   chatBubbleSprite?: THREE.Sprite | null;
   chatBubbleTimer?: number;
   activeEmote?: EmoteType | null;
   emoteTimer?: number;
   tagLungeTimer?: number;
+  slapFlinchTimer?: number;
+  slapKnockVx?: number;
+  slapKnockVz?: number;
+  handshakeTimer?: number;
+  handshakePartnerId?: string | null;
+  sitPhase?: 'none' | 'sit_down' | 'sitting' | 'stand_up';
+  sitTimer?: number;
+  activeSeat?: SeatSpot | null;
+  preSitPos?: { x: number; z: number } | null;
+  expressionOverride?: FacialExpression | null;
+  expressionOverrideTimer?: number;
 }
 
 function emoteToAnimState(emote: EmoteType): CharacterAnimState {
   switch (emote) {
     case 'laugh':
       return 'emote_laugh';
+    case 'surprise':
+      return 'emote_surprise';
     case 'wave':
       return 'emote_wave';
     case 'dance':
@@ -275,6 +304,10 @@ export class ChhupanChhupaiEngine {
 
   private graphicsQuality: GraphicsQuality = loadInitialGraphicsQuality();
   private levelCache = new Map<number, VillageBuildResult>();
+  private npcCache = new Map<number, VillageNpcSystem>();
+  private activeNpcSystem: VillageNpcSystem | null = null;
+  private templeBells: TempleBellInteractive[] = [];
+  private mapSeats: SeatSpot[] = [];
   private currentLevelId = 1;
   private unlockedLevel = loadUnlockedLevel();
   private newlyUnlockedLevel: number | null = null;
@@ -293,6 +326,8 @@ export class ChhupanChhupaiEngine {
   private seekerActor: ParticipantActor | null = null;
 
   private phase: GamePhase = 'start';
+  private exploreMode = false;
+  private levelBeforeExplore: number | null = null;
   private selectedRole: TeamRole = 'hider';
   private currentCustomization: CharacterCustomization =
     createCustomizationFromPreset(VILLAGE_CHARACTER_PRESETS[0]);
@@ -316,7 +351,10 @@ export class ChhupanChhupaiEngine {
   private seekerProgressPos = new THREE.Vector3();
   private seekerStuckTimer = 0;
   private spectateTargetId: string | null = null;
+  private spectateCameraMode: SpectateCameraMode = 'follow';
+  private freeCamVerticalInput = 0;
   private lastPlayerAnimState: CharacterAnimState = 'idle';
+  private lastPlayerExpression: FacialExpression | undefined = undefined;
 
   private eventBanner: string | null = null;
   private eventBannerTimer = 0;
@@ -342,6 +380,13 @@ export class ChhupanChhupaiEngine {
   private onOnlineLocalState: ((state: PlayerTransformPayload) => void) | null =
     null;
   private onOnlineTagRequest: ((targetPlayerId: string) => void) | null = null;
+  private onOnlineSlapRequest: ((targetPlayerId: string) => void) | null = null;
+  private onOnlineHandshakeRequest: ((targetPlayerId: string) => void) | null =
+    null;
+  private playerSlapCooldown = 0;
+  private playerHandshakeCooldown = 0;
+  private npcSlapCooldown = 0;
+  private templeBellCooldown = 0;
   private mutedPlayerIds = new Set<string>();
   private previewEmote: EmoteType | null = null;
   private previewEmoteTimer = 0;
@@ -696,6 +741,7 @@ export class ChhupanChhupaiEngine {
     if (this.dustMotes) this.dustMotes.visible = q !== 'low';
     if (this.faceFillLight) this.faceFillLight.visible = true;
     this.applyGraphicsQualityToGroup(this.worldGroup);
+    this.activeNpcSystem?.setGraphicsQuality(this.graphicsQuality);
   }
 
   public setGraphicsQuality(quality: GraphicsQuality): void {
@@ -711,6 +757,13 @@ export class ChhupanChhupaiEngine {
   }
 
   private detachWorldGroup(): void {
+    if (this.activeNpcSystem) {
+      this.scene.remove(this.activeNpcSystem.group);
+      this.activeNpcSystem = null;
+    }
+    this.templeBells = [];
+    this.templeBellCooldown = 0;
+    this.npcSlapCooldown = 0;
     if (!this.worldGroup) return;
     this.updateHouseRoofVisibility(null);
     this.scene.remove(this.worldGroup);
@@ -730,6 +783,7 @@ export class ChhupanChhupaiEngine {
     this.detachWorldGroup();
 
     this.currentLevelId = levelId;
+    this.audio.setActiveLevel(levelId);
     this.activeLevelConfig = getLevelConfig(levelId);
     this.applyLevelAtmosphere(this.activeLevelConfig);
 
@@ -747,8 +801,28 @@ export class ChhupanChhupaiEngine {
     this.hidingSpots = built.hidingSpots;
     this.houseInteriors = built.houseInteriors;
     this.pondWater = built.pondWater;
+    this.templeBells = built.templeBells ?? [];
+    this.mapSeats = built.seats ?? [];
     this.activeMinimapLayout = built.minimapLayout;
     this.activeSpawnPoints = built.spawnPoints ?? null;
+
+    // Attach ambient village NPCs & animals outside built.group so they never
+    // interfere with gameplay colliders, hiding spots, or camera wall raycasts.
+    let npcSys = this.npcCache.get(levelId);
+    if (!npcSys) {
+      npcSys = new VillageNpcSystem(
+        levelId,
+        this.textures,
+        built.colliders,
+        built.minimapLayout,
+        this.graphicsQuality,
+      );
+      this.npcCache.set(levelId, npcSys);
+    } else {
+      npcSys.setGraphicsQuality(this.graphicsQuality);
+    }
+    this.activeNpcSystem = npcSys;
+    this.scene.add(npcSys.group);
 
     // Collect solid walls, buildings, trunks & large props for 3D camera wall avoidance
     built.group.updateMatrixWorld(true);
@@ -1181,6 +1255,10 @@ export class ChhupanChhupaiEngine {
     this.prevSeekerMode = 'counting';
     this.lastPlayerAnimState = 'counting_eyes_closed';
     this.spectateTargetId = null;
+    this.spectateCameraMode = 'follow';
+    this.freeCamVerticalInput = 0;
+    this.cameraController?.exitFreeCamera();
+    this.cameraController?.setFullScreenTouchLook(false);
     this.seekerSearchQueue = this.buildSeekerSearchQueue();
     this.patrolIndex = Math.floor(
       Math.random() * Math.max(1, this.seekerSearchQueue.length),
@@ -1363,6 +1441,8 @@ export class ChhupanChhupaiEngine {
     role: TeamRole,
     customization: CharacterCustomization,
   ): void {
+    this.exploreMode = false;
+    this.levelBeforeExplore = null;
     this.onlineMode = false;
     this.onlineLocalPlayerId = null;
     this.currentOnlineRound = 0;
@@ -1372,6 +1452,7 @@ export class ChhupanChhupaiEngine {
     this.keysPressed.clear();
     this.touchMoveX = 0;
     this.touchMoveZ = 0;
+    this.playerSlapCooldown = 0;
     this.setupMatchRoster(role, customization);
     this.audio.playCountdownTick(Math.ceil(HEADSTART_SECONDS));
     const seekerLabel = this.seekerActor?.name ?? 'The Seeker';
@@ -1385,12 +1466,109 @@ export class ChhupanChhupaiEngine {
     this.emitHud();
   }
 
+  public startExploreSchool(customization: CharacterCustomization): void {
+    if (!this.textures) return;
+    if (!this.exploreMode) {
+      this.levelBeforeExplore = this.currentLevelId;
+    }
+    if (this.currentLevelId !== 2) {
+      this.loadLevelWorld(2);
+    }
+
+    this.onlineMode = false;
+    this.onlineLocalPlayerId = null;
+    this.currentOnlineRound = 0;
+    this.exploreMode = true;
+    this.selectedRole = 'hider';
+    this.currentCustomization = { ...customization };
+    this.audio.unlock();
+    this.phase = 'playing';
+    this.winner = null;
+    this.pendingWinner = null;
+    this.newlyUnlockedLevel = null;
+    this.pendingEndTimer = 0;
+    this.countdownTimer = 0;
+    this.lastCountdownCeil = 0;
+    this.timeRemaining = MATCH_DURATION_SECONDS;
+    this.keysPressed.clear();
+    this.touchMoveX = 0;
+    this.touchMoveZ = 0;
+    this.playerSlapCooldown = 0;
+    this.templeBellCooldown = 0;
+    this.npcSlapCooldown = 0;
+    this.spectateTargetId = null;
+    this.spectateCameraMode = 'follow';
+    this.freeCamVerticalInput = 0;
+
+    this.clearPreviewRig();
+    this.clearActors();
+
+    const cleanPlayerName = customization.name.trim() || 'Player';
+    const rig = createCharacterFromCustomization(
+      customization,
+      false,
+      this.textures.contactShadow,
+    );
+    // Spawn in the front school courtyard looking straight at the 1995 Prathmik Vidyalaya
+    rig.root.position.set(0, 0, 15.5);
+    rig.root.rotation.y = Math.PI;
+    const nameplateSprite = this.createNameplateSprite(cleanPlayerName, 'hider');
+    rig.root.add(nameplateSprite);
+    this.scene.add(rig.root);
+
+    const playerActor: ParticipantActor = {
+      id: 'explore-player',
+      name: cleanPlayerName,
+      role: 'hider',
+      isPlayer: true,
+      rig,
+      caught: false,
+      caughtAtSeconds: null,
+      caughtAnimElapsed: 0,
+      isHiding: false,
+      lastMoveSpeed: 0,
+      vy: 0,
+      grounded: true,
+      radarSeed: 1.25,
+      targetSpotIndex: -1,
+      waypoints: [],
+      retargetCooldown: 0,
+      nameplateSprite,
+    };
+
+    this.actors = [playerActor];
+    this.playerActor = playerActor;
+    this.seekerActor = null;
+    this.cameraController?.exitFreeCamera();
+    this.cameraController?.setFullScreenTouchLook(false);
+    this.cameraController?.setEnabled(true);
+    this.cameraController?.snapBehind(
+      playerActor.rig.root.position,
+      playerActor.rig.root.rotation.y,
+      this.camera,
+    );
+
+    this.showBanner(
+      'Exploring 1995 Village School — Visit classrooms, stairs, hand pump & bell!',
+      4.0,
+    );
+    this.emitHud();
+  }
+
+  public exitExploreMode(): void {
+    this.returnToStart();
+  }
+
   public setOnlineCallbacks(
     onLocalState: ((state: PlayerTransformPayload) => void) | null,
     onTagRequest: ((targetPlayerId: string) => void) | null,
+    onSlapRequest?: ((targetPlayerId: string) => void) | null,
+    onHandshakeRequest?: ((targetPlayerId: string) => void) | null,
   ): void {
     this.onOnlineLocalState = onLocalState;
     this.onOnlineTagRequest = onTagRequest;
+    this.onOnlineSlapRequest = onSlapRequest ?? null;
+    this.onOnlineHandshakeRequest = onHandshakeRequest ?? null;
   }
 
   public previewOnlineLobbyMap(levelId: number): void {
@@ -1424,6 +1602,8 @@ export class ChhupanChhupaiEngine {
       this.loadLevelWorld(room.levelId);
     }
 
+    this.exploreMode = false;
+    this.levelBeforeExplore = null;
     this.onlineMode = true;
     this.onlineLocalPlayerId = localPlayerId;
     this.currentOnlineRound = room.roundNumber;
@@ -1433,6 +1613,7 @@ export class ChhupanChhupaiEngine {
     this.keysPressed.clear();
     this.touchMoveX = 0;
     this.touchMoveZ = 0;
+    this.playerSlapCooldown = 0;
 
     this.clearPreviewRig();
     this.clearActors();
@@ -1453,6 +1634,10 @@ export class ChhupanChhupaiEngine {
     this.seekerMode = room.countdownSeconds > 0 ? 'counting' : 'searching';
     this.prevSeekerMode = this.seekerMode;
     this.spectateTargetId = null;
+    this.spectateCameraMode = 'follow';
+    this.freeCamVerticalInput = 0;
+    this.cameraController?.exitFreeCamera();
+    this.cameraController?.setFullScreenTouchLook(false);
     this.lastPlayerAnimState =
       this.selectedRole === 'seeker' && room.countdownSeconds > 0
         ? 'counting_eyes_closed'
@@ -1553,6 +1738,11 @@ export class ChhupanChhupaiEngine {
         this.keysPressed.clear();
         this.touchMoveX = 0;
         this.touchMoveZ = 0;
+        this.freeCamVerticalInput = 0;
+        this.spectateTargetId = null;
+        this.spectateCameraMode = 'follow';
+        this.cameraController?.exitFreeCamera();
+        this.cameraController?.setFullScreenTouchLook(false);
         this.cameraController?.setEnabled(false);
         this.clearActors();
         this.updateHouseRoofVisibility(null);
@@ -1605,6 +1795,12 @@ export class ChhupanChhupaiEngine {
         this.winner = room.winner;
         this.pendingWinner = null;
         this.eventBanner = null;
+        this.spectateCameraMode = 'follow';
+        this.freeCamVerticalInput = 0;
+        this.touchMoveX = 0;
+        this.touchMoveZ = 0;
+        this.cameraController?.exitFreeCamera();
+        this.cameraController?.setFullScreenTouchLook(false);
 
         const playerWon =
           room.winner !== null &&
@@ -1654,6 +1850,9 @@ export class ChhupanChhupaiEngine {
       if (!actor.caught && p.caught) {
         actor.caught = true;
         actor.isHiding = false;
+        this.clearSeatedStateImmediate(actor);
+        actor.handshakeTimer = 0;
+        actor.handshakePartnerId = null;
         actor.caughtAtSeconds = p.caughtAtSeconds;
         actor.caughtAnimElapsed = 0.001;
         if (actor.rig.tagRing) {
@@ -1669,6 +1868,14 @@ export class ChhupanChhupaiEngine {
             sPos.x - hPos.x,
             sPos.z - hPos.z,
           );
+        }
+        if (actor.isPlayer) {
+          this.spectateTargetId = null;
+          this.spectateCameraMode = 'follow';
+          this.freeCamVerticalInput = 0;
+          this.touchMoveX = 0;
+          this.touchMoveZ = 0;
+          this.cameraController?.exitFreeCamera();
         }
       } else if (actor.isRemote) {
         actor.isHiding = p.isHiding;
@@ -1697,7 +1904,11 @@ export class ChhupanChhupaiEngine {
       actor.remoteTargetRotY = pos.rotY;
       actor.lastMoveSpeed = pos.moveSpeed;
       actor.isHiding = pos.isHiding;
-      actor.remoteAnimState = pos.animState;
+      if (actor.remoteAnimState !== pos.animState) {
+        actor.remoteAnimState = pos.animState;
+        actor.remoteAnimElapsed = 0;
+      }
+      actor.remoteExpression = pos.expression;
     }
   }
 
@@ -1720,6 +1931,37 @@ export class ChhupanChhupaiEngine {
         if (event.message) this.showBanner(event.message, 3.0);
         this.emitHud();
         break;
+      case 'hider_slap': {
+        const slapper = event.slapperPlayerId
+          ? this.actors.find((a) => a.id === event.slapperPlayerId)
+          : null;
+        const target = event.targetPlayerId
+          ? this.actors.find((a) => a.id === event.targetPlayerId)
+          : null;
+        if (slapper && target) {
+          this.applyHiderSlapEffect(slapper, target, event.message);
+        } else {
+          this.audio.playHiderSlap();
+          if (event.message) this.showBanner(event.message, 2.2);
+          this.emitHud();
+        }
+        break;
+      }
+      case 'player_handshake': {
+        const actorA = event.actorPlayerId
+          ? this.actors.find((a) => a.id === event.actorPlayerId)
+          : null;
+        const actorB = event.targetPlayerId
+          ? this.actors.find((a) => a.id === event.targetPlayerId)
+          : null;
+        if (actorA && actorB) {
+          this.applyHandshakeEffect(actorA, actorB, event.message);
+        } else {
+          if (event.message) this.showBanner(event.message, 2.4);
+          this.emitHud();
+        }
+        break;
+      }
       case 'banner':
         if (event.message) this.showBanner(event.message, 3.0);
         this.emitHud();
@@ -1740,7 +1982,12 @@ export class ChhupanChhupaiEngine {
   }
 
   private emitOnlineLocalState(): void {
-    if (!this.onlineMode || !this.playerActor || !this.onOnlineLocalState) {
+    if (
+      !this.onlineMode ||
+      !this.playerActor ||
+      this.playerActor.caught ||
+      !this.onOnlineLocalState
+    ) {
       return;
     }
     const pos = this.playerActor.rig.root.position;
@@ -1752,6 +1999,7 @@ export class ChhupanChhupaiEngine {
       moveSpeed: this.playerActor.lastMoveSpeed,
       isHiding: this.playerActor.isHiding,
       animState: this.lastPlayerAnimState,
+      expression: this.lastPlayerExpression,
     });
   }
 
@@ -1793,6 +2041,20 @@ export class ChhupanChhupaiEngine {
     actor.rig.root.add(bubble);
     actor.chatBubbleSprite = bubble;
     actor.chatBubbleTimer = 4.5;
+  }
+
+  public triggerLocalEmote(emote: EmoteType, bubbleText: string): void {
+    if (this.phase === 'playing' && this.playerActor && !this.playerActor.caught) {
+      this.audio.unlock();
+      this.triggerCharacterEmote(this.playerActor.id, emote, bubbleText);
+    } else if (this.phase === 'start') {
+      this.audio.unlock();
+      this.triggerCharacterEmote(
+        this.onlineLocalPlayerId ?? 'player',
+        emote,
+        bubbleText,
+      );
+    }
   }
 
   public triggerCharacterEmote(
@@ -1852,6 +2114,16 @@ export class ChhupanChhupaiEngine {
             this.hasLineOfSight(localSeekerPos, pos) &&
             (!actor.isHiding || dist <= 6.2);
           actor.nameplateSprite.visible = canSee;
+        } else if (
+          this.isActivelySpectating() &&
+          this.spectateCameraMode === 'free' &&
+          actor.role === 'hider'
+        ) {
+          // Prevent X-ray nameplate leaks through walls while flying Free Camera
+          const pos = actor.rig.root.position;
+          const dist = this.camera.position.distanceTo(pos);
+          actor.nameplateSprite.visible =
+            dist <= 15.0 && this.hasLineOfSight(this.camera.position, pos);
         } else {
           actor.nameplateSprite.visible = true;
         }
@@ -1927,29 +2199,80 @@ export class ChhupanChhupaiEngine {
       if (actor.tagLungeTimer && actor.tagLungeTimer > 0) {
         actor.tagLungeTimer = Math.max(0, actor.tagLungeTimer - dt);
       }
+      if (actor.slapFlinchTimer && actor.slapFlinchTimer > 0) {
+        actor.slapFlinchTimer = Math.max(0, actor.slapFlinchTimer - dt);
+      }
+      if (actor.handshakeTimer && actor.handshakeTimer > 0) {
+        actor.handshakeTimer = Math.max(0, actor.handshakeTimer - dt);
+        if (actor.handshakeTimer === 0) {
+          actor.handshakePartnerId = null;
+        }
+      }
+      if (actor.expressionOverrideTimer && actor.expressionOverrideTimer > 0) {
+        actor.expressionOverrideTimer = Math.max(
+          0,
+          actor.expressionOverrideTimer - dt,
+        );
+        if (actor.expressionOverrideTimer === 0) {
+          actor.expressionOverride = null;
+        }
+      }
+      actor.remoteAnimElapsed = (actor.remoteAnimElapsed ?? 0) + dt;
 
       const animState: CharacterAnimState =
         actor.tagLungeTimer && actor.tagLungeTimer > 0
           ? 'tag_lunge'
-          : actor.role === 'seeker' &&
-              this.countdownTimer > 0 &&
-              actor.lastMoveSpeed <= 0.15
-            ? (actor.remoteAnimState ?? 'counting_eyes_closed')
-            : actor.activeEmote && actor.emoteTimer && actor.emoteTimer > 0
-              ? emoteToAnimState(actor.activeEmote)
-              : (actor.remoteAnimState ??
-                this.resolveMovementAnimState(
-                  pos,
-                  actor.lastMoveSpeed,
-                  actor.isHiding,
-                ));
+          : actor.handshakeTimer && actor.handshakeTimer > 0
+            ? 'handshake'
+            : actor.role === 'seeker' &&
+                this.countdownTimer > 0 &&
+                actor.lastMoveSpeed <= 0.15
+              ? (actor.remoteAnimState ?? 'counting_eyes_closed')
+              : actor.activeEmote && actor.emoteTimer && actor.emoteTimer > 0
+                ? emoteToAnimState(actor.activeEmote)
+                : (actor.remoteAnimState ??
+                  this.resolveMovementAnimState(
+                    pos,
+                    actor.lastMoveSpeed,
+                    actor.isHiding,
+                  ));
+
+      let interactionProgress = 0;
+      if (animState === 'handshake') {
+        interactionProgress =
+          actor.handshakeTimer && actor.handshakeTimer > 0
+            ? 1 - actor.handshakeTimer / HANDSHAKE_DURATION
+            : Math.min(1, (actor.remoteAnimElapsed ?? 0) / HANDSHAKE_DURATION);
+      } else if (animState === 'sit_down') {
+        interactionProgress = Math.min(
+          1,
+          (actor.remoteAnimElapsed ?? 0) / SIT_DOWN_DURATION,
+        );
+      } else if (animState === 'stand_up') {
+        interactionProgress = Math.min(
+          1,
+          (actor.remoteAnimElapsed ?? 0) / STAND_UP_DURATION,
+        );
+      }
+
+      const gaze = this.computeConversationLook(actor);
+      const expr =
+        actor.remoteExpression ??
+        this.resolveActorFacialExpression(actor, animState);
 
       actor.rig.updateAnimation({
         dt,
         moveSpeed: actor.lastMoveSpeed,
         state: animState,
         lookAroundPhase: 0,
-        expression: this.resolveActorFacialExpression(actor, animState),
+        expression: expr,
+        eyeLookX: gaze.eyeLookX,
+        eyeLookY: gaze.eyeLookY,
+        headLookYaw: gaze.headLookYaw,
+        headLookPitch: gaze.headLookPitch,
+        isConversing: gaze.isConversing,
+        isSpeaking: gaze.isSpeaking,
+        interactionProgress,
         airHeight: animState === 'jump' ? Math.max(0, pos.y) : 0,
       });
     }
@@ -1960,20 +2283,36 @@ export class ChhupanChhupaiEngine {
   }
 
   public returnToStart(): void {
+    const restoreLevel = this.exploreMode ? this.levelBeforeExplore : null;
+    this.exploreMode = false;
+    this.levelBeforeExplore = null;
     this.phase = 'start';
     this.keysPressed.clear();
     this.touchMoveX = 0;
     this.touchMoveZ = 0;
+    this.freeCamVerticalInput = 0;
+    this.spectateTargetId = null;
+    this.spectateCameraMode = 'follow';
+    this.cameraController?.exitFreeCamera();
+    this.cameraController?.setFullScreenTouchLook(false);
     this.cameraController?.setEnabled(false);
     this.clearActors();
     this.updateHouseRoofVisibility(null);
+    if (restoreLevel !== null && restoreLevel !== this.currentLevelId) {
+      this.loadLevelWorld(restoreLevel);
+    }
     this.rebuildPreviewCharacter();
     this.emitHud();
   }
 
   public recenterCamera(): void {
+    if (this.phase === 'start') return;
+    if (this.isActivelySpectating() && this.spectateCameraMode === 'free') {
+      this.setSpectateCameraMode('follow');
+      return;
+    }
     const focusActor = this.getCameraFocusActor();
-    if (!focusActor || this.phase === 'start') return;
+    if (!focusActor) return;
     this.cameraController?.recenterBehind(focusActor.rig.root.rotation.y);
   }
 
@@ -2001,15 +2340,37 @@ export class ChhupanChhupaiEngine {
 
   private emitMinimapFrame(): void {
     if (!this.minimapListener || this.phase !== 'playing') return;
+    const isSpectating = this.isActivelySpectating();
+    const isFreeCam = isSpectating && this.spectateCameraMode === 'free';
     const focusActor = this.getCameraFocusActor();
-    if (!focusActor) return;
+    if (!isFreeCam && !focusActor) return;
 
-    const focusPos = focusActor.rig.root.position;
+    let centerX: number;
+    let centerZ: number;
+    let headingYaw: number;
+    const camYaw = this.cameraController?.getCameraYaw() ?? 0;
+
+    if (isFreeCam && this.cameraController) {
+      this.cameraController.getFreeCameraPosition(_freeCamPos);
+      centerX = _freeCamPos.x;
+      centerZ = _freeCamPos.z;
+      // Forward heading matches camera look direction (-sin(camYaw), -cos(camYaw)) -> yaw = camYaw + PI
+      headingYaw = camYaw + Math.PI;
+    } else {
+      const focusPos = focusActor!.rig.root.position;
+      centerX = focusPos.x;
+      centerZ = focusPos.z;
+      headingYaw = focusActor!.rig.root.rotation.y;
+    }
+
     const others: MinimapActorDot[] = [];
 
     for (const actor of this.actors) {
-      if (actor === focusActor) continue;
+      if (!isFreeCam && actor === focusActor) continue;
       if (actor.role === 'hider' && actor.caught) continue;
+      // Fair-play protection: spectators never get radar dots for hidden hiders on the minimap
+      // (only the Seeker's approximate zone is shown so spectators cannot call out hiding spots).
+      if (isSpectating && actor.role === 'hider') continue;
 
       const pos = actor.rig.root.position;
       // Smoothly drifting approximate offset so the minimap shows each other player's
@@ -2029,14 +2390,12 @@ export class ChhupanChhupaiEngine {
     }
 
     this.minimapListener({
-      playerX: focusPos.x,
-      playerZ: focusPos.z,
-      playerYaw: focusActor.rig.root.rotation.y,
-      cameraYaw: this.cameraController?.getCameraYaw() ?? 0,
+      playerX: centerX,
+      playerZ: centerZ,
+      playerYaw: headingYaw,
+      cameraYaw: camYaw,
       playerRole: this.selectedRole,
-      isSpectating: Boolean(
-        this.playerActor && focusActor !== this.playerActor,
-      ),
+      isSpectating,
       layout: this.activeMinimapLayout,
       others,
     });
@@ -2052,6 +2411,13 @@ export class ChhupanChhupaiEngine {
       return;
     }
     this.audio.unlock();
+    if (this.playerActor.sitPhase && this.playerActor.sitPhase !== 'none') {
+      this.clearSeatedStateImmediate(this.playerActor);
+    }
+    if (this.playerActor.handshakeTimer && this.playerActor.handshakeTimer > 0) {
+      this.playerActor.handshakeTimer = 0;
+      this.playerActor.handshakePartnerId = null;
+    }
     this.playerActor.isHiding = !this.playerActor.isHiding;
     this.audio.playHide(this.playerActor.isHiding);
     if (this.onlineMode) {
@@ -2068,6 +2434,13 @@ export class ChhupanChhupaiEngine {
       (this.playerActor.role === 'seeker' && this.countdownTimer > 0)
     ) {
       return;
+    }
+    if (this.playerActor.sitPhase && this.playerActor.sitPhase !== 'none') {
+      this.clearSeatedStateImmediate(this.playerActor);
+    }
+    if (this.playerActor.handshakeTimer && this.playerActor.handshakeTimer > 0) {
+      this.playerActor.handshakeTimer = 0;
+      this.playerActor.handshakePartnerId = null;
     }
     if (!this.playerActor.grounded) return;
     this.audio.unlock();
@@ -2097,6 +2470,9 @@ export class ChhupanChhupaiEngine {
       return;
     }
     this.audio.unlock();
+    if (this.playerActor.sitPhase && this.playerActor.sitPhase !== 'none') {
+      this.clearSeatedStateImmediate(this.playerActor);
+    }
     const target = this.findNearestTagTarget();
     if (target) {
       if (this.onlineMode) {
@@ -2116,6 +2492,622 @@ export class ChhupanChhupaiEngine {
     }
   }
 
+  private findNearestSlapTarget(): ParticipantActor | null {
+    if (
+      !this.playerActor ||
+      this.playerActor.role !== 'hider' ||
+      this.playerActor.caught
+    ) {
+      return null;
+    }
+    const playerPos = this.playerActor.rig.root.position;
+    let best: ParticipantActor | null = null;
+    let bestDist = SLAP_RANGE;
+
+    for (const hider of this.getActiveHiders()) {
+      if (hider.id === this.playerActor.id) continue;
+      const hPos = hider.rig.root.position;
+      const d = playerPos.distanceTo(hPos);
+      if (d <= bestDist && this.canSeeForTag(playerPos, hPos)) {
+        bestDist = d;
+        best = hider;
+      }
+    }
+    return best;
+  }
+
+  public trySlapHider(): void {
+    if (
+      this.phase !== 'playing' ||
+      !this.playerActor ||
+      this.playerActor.role !== 'hider' ||
+      this.playerActor.caught ||
+      this.pendingWinner !== null ||
+      this.playerSlapCooldown > 0
+    ) {
+      return;
+    }
+    this.audio.unlock();
+    const target = this.findNearestSlapTarget();
+    if (!target) return;
+
+    this.playerSlapCooldown = HIDER_SLAP_COOLDOWN;
+    if (this.playerActor.isHiding) {
+      this.playerActor.isHiding = false;
+    }
+    this.playerActor.tagLungeTimer = 0.36;
+
+    const pPos = this.playerActor.rig.root.position;
+    const tPos = target.rig.root.position;
+    this.playerActor.rig.root.rotation.y = Math.atan2(
+      tPos.x - pPos.x,
+      tPos.z - pPos.z,
+    );
+
+    if (this.onlineMode) {
+      this.onOnlineSlapRequest?.(target.id);
+    } else {
+      this.applyHiderSlapEffect(this.playerActor, target);
+    }
+    this.emitHud();
+  }
+
+  private applyHiderSlapEffect(
+    slapper: ParticipantActor,
+    target: ParticipantActor,
+    customMessage?: string,
+  ): void {
+    if (target.caught) return;
+    this.audio.playHiderSlap();
+
+    slapper.tagLungeTimer = 0.36;
+    const sPos = slapper.rig.root.position;
+    const tPos = target.rig.root.position;
+    const dx = tPos.x - sPos.x;
+    const dz = tPos.z - sPos.z;
+    const dist = Math.hypot(dx, dz) || 1;
+    const nx = dx / dist;
+    const nz = dz / dist;
+
+    slapper.rig.root.rotation.y = Math.atan2(dx, dz);
+    target.rig.root.rotation.y = Math.atan2(-dx, -dz);
+    this.clearSeatedStateImmediate(slapper);
+    this.clearSeatedStateImmediate(target);
+    slapper.handshakeTimer = 0;
+    target.handshakeTimer = 0;
+    target.isHiding = false;
+    target.slapFlinchTimer = 0.72;
+    target.expressionOverride = 'surprise';
+    target.expressionOverrideTimer = 1.1;
+    target.slapKnockVx = nx * 4.4;
+    target.slapKnockVz = nz * 4.4;
+
+    if (target.grounded) {
+      target.vy = 2.6;
+      target.grounded = false;
+    }
+
+    const reactions = ['Ouch! 👋', 'Arre! 👋', 'Hey! 👋', 'Oye! 👋'];
+    const bubble =
+      reactions[Math.floor(Math.random() * reactions.length)] ?? 'Ouch! 👋';
+    this.showCharacterChatBubble(target.id, bubble, true);
+
+    const bannerText =
+      customMessage ?? `${slapper.name} playfully slapped ${target.name}!`;
+    this.showBanner(bannerText, 2.2);
+    this.emitHud();
+  }
+
+  private findNearestHandshakeTarget(
+    maxRange = HANDSHAKE_RANGE,
+  ): ParticipantActor | null {
+    if (
+      !this.playerActor ||
+      this.playerActor.caught ||
+      this.phase !== 'playing'
+    ) {
+      return null;
+    }
+    const pPos = this.playerActor.rig.root.position;
+    let best: ParticipantActor | null = null;
+    let bestDistSq = maxRange * maxRange;
+
+    for (const candidate of this.actors) {
+      if (
+        candidate === this.playerActor ||
+        candidate.caught ||
+        candidate.role !== this.playerActor.role
+      ) {
+        continue;
+      }
+      const cPos = candidate.rig.root.position;
+      const dx = cPos.x - pPos.x;
+      const dz = cPos.z - pPos.z;
+      const dSq = dx * dx + dz * dz;
+      if (dSq <= bestDistSq) {
+        bestDistSq = dSq;
+        best = candidate;
+      }
+    }
+    return best;
+  }
+
+  public tryHandshake(): void {
+    if (
+      this.phase !== 'playing' ||
+      !this.playerActor ||
+      this.playerActor.caught ||
+      this.pendingWinner !== null ||
+      (this.countdownTimer > 0 && this.playerActor.role === 'seeker') ||
+      this.playerHandshakeCooldown > 0
+    ) {
+      return;
+    }
+
+    const target = this.findNearestHandshakeTarget(HANDSHAKE_RANGE);
+    if (!target) return;
+
+    this.audio.unlock();
+    this.playerHandshakeCooldown = HANDSHAKE_COOLDOWN;
+
+    if (this.onlineMode) {
+      this.onOnlineHandshakeRequest?.(target.id);
+    } else {
+      this.applyHandshakeEffect(this.playerActor, target);
+    }
+  }
+
+  private applyHandshakeEffect(
+    actorA: ParticipantActor,
+    actorB: ParticipantActor,
+    customMessage?: string,
+  ): void {
+    if (actorA.caught || actorB.caught) return;
+
+    this.clearSeatedStateImmediate(actorA);
+    this.clearSeatedStateImmediate(actorB);
+
+    actorA.isHiding = false;
+    actorB.isHiding = false;
+    actorA.activeEmote = null;
+    actorA.emoteTimer = 0;
+    actorB.activeEmote = null;
+    actorB.emoteTimer = 0;
+
+    const posA = actorA.rig.root.position;
+    const posB = actorB.rig.root.position;
+    const dx = posB.x - posA.x;
+    const dz = posB.z - posA.z;
+    const dist = Math.hypot(dx, dz) || 0.01;
+    const nx = dx / dist;
+    const nz = dz / dist;
+
+    // Face each other naturally for the handshake
+    actorA.rig.root.rotation.y = Math.atan2(dx, dz);
+    actorB.rig.root.rotation.y = Math.atan2(-dx, -dz);
+
+    // Gently step slightly closer if standing far apart (~1.05m ideal hand clasp distance)
+    if (dist > 1.35 && !actorA.isRemote && !actorB.isRemote) {
+      const pull = Math.min(0.45, (dist - 1.05) * 0.45);
+      posA.x += nx * pull;
+      posA.z += nz * pull;
+      posB.x -= nx * pull;
+      posB.z -= nz * pull;
+      this.resolveCollisions(posA, CHAR_RADIUS);
+      this.resolveCollisions(posB, CHAR_RADIUS);
+    }
+
+    actorA.handshakeTimer = HANDSHAKE_DURATION;
+    actorB.handshakeTimer = HANDSHAKE_DURATION;
+    actorA.handshakePartnerId = actorB.id;
+    actorB.handshakePartnerId = actorA.id;
+    actorA.expressionOverride = 'laughing';
+    actorA.expressionOverrideTimer = HANDSHAKE_DURATION + 0.35;
+    actorB.expressionOverride = 'laughing';
+    actorB.expressionOverrideTimer = HANDSHAKE_DURATION + 0.35;
+
+    this.audio.playHide(false);
+
+    const greetings = ['🤝 Namaste!', '🤝 Dost!', '🤝 Hello ji!', '🤝 Milte hain!'];
+    const bubbleA =
+      greetings[Math.floor(Math.random() * greetings.length)] ?? '🤝 Namaste!';
+    const bubbleB =
+      greetings[(Math.floor(Math.random() * greetings.length) + 1) % greetings.length] ??
+      '🤝 Dost!';
+    this.showCharacterChatBubble(actorA.id, bubbleA, true);
+    this.showCharacterChatBubble(actorB.id, bubbleB, true);
+
+    if (this.onlineMode && (actorA.isPlayer || actorB.isPlayer)) {
+      this.lastPlayerAnimState = 'handshake';
+      this.lastPlayerExpression = 'laughing';
+      this.emitOnlineLocalState();
+    }
+
+    const bannerText =
+      customMessage ?? `🤝 ${actorA.name} and ${actorB.name} shook hands!`;
+    this.showBanner(bannerText, 2.3);
+    this.emitHud();
+  }
+
+  private getAllAvailableSeats(): SeatSpot[] {
+    const ambient = this.activeNpcSystem?.getAvailableSeats() ?? [];
+    if (ambient.length === 0) return this.mapSeats;
+    if (this.mapSeats.length === 0) return ambient;
+    return [...this.mapSeats, ...ambient];
+  }
+
+  private isSeatOccupied(seat: SeatSpot, ignoreActorId?: string): boolean {
+    if (this.activeNpcSystem?.isSpotOccupiedByNpc(seat.x, seat.z, 0.52)) {
+      return true;
+    }
+    for (const a of this.actors) {
+      if (a.id === ignoreActorId || a.caught) continue;
+      if (a.activeSeat?.id === seat.id) return true;
+      const dx = a.rig.root.position.x - seat.x;
+      const dz = a.rig.root.position.z - seat.z;
+      if (dx * dx + dz * dz < 0.32) return true;
+    }
+    return false;
+  }
+
+  private findNearestAvailableSeat(maxRange = SIT_RANGE): SeatSpot | null {
+    if (
+      !this.playerActor ||
+      this.playerActor.caught ||
+      this.phase !== 'playing'
+    ) {
+      return null;
+    }
+    const pPos = this.playerActor.rig.root.position;
+    const seats = this.getAllAvailableSeats();
+    let best: SeatSpot | null = null;
+    let bestDistSq = maxRange * maxRange;
+
+    for (let i = 0; i < seats.length; i++) {
+      const seat = seats[i];
+      const dx = seat.x - pPos.x;
+      const dz = seat.z - pPos.z;
+      const dSq = dx * dx + dz * dz;
+      if (dSq > bestDistSq) continue;
+      if (this.isSeatOccupied(seat, this.playerActor.id)) continue;
+      bestDistSq = dSq;
+      best = seat;
+    }
+    return best;
+  }
+
+  private clearSeatedStateImmediate(actor: ParticipantActor): void {
+    if (!actor.sitPhase || actor.sitPhase === 'none') return;
+    const seat = actor.activeSeat;
+    const pre = actor.preSitPos;
+    actor.sitPhase = 'none';
+    actor.sitTimer = 0;
+    actor.activeSeat = null;
+    actor.preSitPos = null;
+
+    const pos = actor.rig.root.position;
+    if (pre) {
+      pos.x = pre.x;
+      pos.z = pre.z;
+    } else if (seat) {
+      pos.x = seat.x + Math.sin(seat.rotY) * 0.85;
+      pos.z = seat.z + Math.cos(seat.rotY) * 0.85;
+    }
+    pos.y = 0;
+    this.resolveCollisions(pos, CHAR_RADIUS);
+  }
+
+  private beginStandUp(actor: ParticipantActor): void {
+    if (!actor.sitPhase || actor.sitPhase === 'none' || actor.sitPhase === 'stand_up') {
+      return;
+    }
+    actor.sitPhase = 'stand_up';
+    actor.sitTimer = 0;
+    if (actor.isPlayer && this.onlineMode) {
+      this.lastPlayerAnimState = 'stand_up';
+      this.emitOnlineLocalState();
+    }
+    this.emitHud();
+  }
+
+  public tryToggleSit(): void {
+    if (
+      this.phase !== 'playing' ||
+      !this.playerActor ||
+      this.playerActor.caught ||
+      this.pendingWinner !== null ||
+      (this.countdownTimer > 0 && this.playerActor.role === 'seeker')
+    ) {
+      return;
+    }
+
+    this.audio.unlock();
+    const actor = this.playerActor;
+
+    if (actor.sitPhase === 'sitting' || actor.sitPhase === 'sit_down') {
+      this.beginStandUp(actor);
+      return;
+    }
+    if (actor.sitPhase === 'stand_up') return;
+
+    const seat = this.findNearestAvailableSeat(SIT_RANGE);
+    if (!seat) return;
+
+    actor.isHiding = false;
+    actor.activeEmote = null;
+    actor.emoteTimer = 0;
+    actor.handshakeTimer = 0;
+    actor.handshakePartnerId = null;
+
+    const pos = actor.rig.root.position;
+    actor.preSitPos = { x: pos.x, z: pos.z };
+    actor.activeSeat = seat;
+    actor.sitPhase = 'sit_down';
+    actor.sitTimer = 0;
+    actor.vy = 0;
+    actor.grounded = true;
+    actor.lastMoveSpeed = 0;
+
+    if (this.onlineMode) {
+      this.lastPlayerAnimState = 'sit_down';
+      this.emitOnlineLocalState();
+    }
+    this.emitHud();
+  }
+
+  private computeConversationLook(actor: ParticipantActor): {
+    headLookYaw: number;
+    headLookPitch: number;
+    eyeLookX: number;
+    eyeLookY: number;
+    isConversing: boolean;
+    isSpeaking: boolean;
+  } {
+    const isSpeaking = (actor.chatBubbleTimer ?? 0) > 0;
+    const pos = actor.rig.root.position;
+    const isSeated =
+      actor.sitPhase === 'sitting' ||
+      actor.remoteAnimState === 'sitting';
+    const myEyeY = pos.y + (isSeated ? 1.15 : 1.48);
+
+    let targetX: number | null = null;
+    let targetY = myEyeY;
+    let targetZ: number | null = null;
+    let strongConv = isSpeaking;
+
+    // 1. Active handshake partner takes highest gaze priority
+    if (actor.handshakePartnerId && (actor.handshakeTimer ?? 0) > 0) {
+      const partner = this.actors.find(
+        (a) => a.id === actor.handshakePartnerId && !a.caught,
+      );
+      if (partner) {
+        const pPos = partner.rig.root.position;
+        targetX = pPos.x;
+        targetY = pPos.y + 1.48;
+        targetZ = pPos.z;
+        strongConv = true;
+      }
+    }
+
+    // 2. Nearby friendly/chatting players within conversation distance (5.5m)
+    if (targetX === null) {
+      let bestScore = Infinity;
+      for (const other of this.actors) {
+        if (other === actor || other.caught) continue;
+        const oPos = other.rig.root.position;
+        const dx = oPos.x - pos.x;
+        const dz = oPos.z - pos.z;
+        const dist = Math.hypot(dx, dz);
+        if (dist > 5.5 || dist < 0.25) continue;
+
+        const otherSpeaking = (other.chatBubbleTimer ?? 0) > 0;
+        const isFriendly = other.role === actor.role;
+        // Prioritize speaking partners & friendly teammates
+        const score = dist - (otherSpeaking ? 2.5 : 0) - (isFriendly ? 0.6 : 0);
+        if (score < bestScore) {
+          bestScore = score;
+          targetX = oPos.x;
+          const otherSeated =
+            other.sitPhase === 'sitting' || other.remoteAnimState === 'sitting';
+          targetY = oPos.y + (otherSeated ? 1.15 : 1.48);
+          targetZ = oPos.z;
+          if (otherSpeaking || dist < 3.6) {
+            strongConv = true;
+          }
+        }
+      }
+    }
+
+    // 3. When seated or standing idle, gently look toward nearby villagers/NPCs
+    if (
+      targetX === null &&
+      actor.lastMoveSpeed <= 0.2 &&
+      this.activeNpcSystem
+    ) {
+      const npcHead = this.activeNpcSystem.getNearestHumanNpcHead(
+        pos.x,
+        pos.z,
+        3.8,
+      );
+      if (npcHead) {
+        targetX = npcHead.x;
+        targetY = npcHead.y;
+        targetZ = npcHead.z;
+        strongConv = true;
+      }
+    }
+
+    if (targetX === null || targetZ === null) {
+      return {
+        headLookYaw: 0,
+        headLookPitch: 0,
+        eyeLookX: 0,
+        eyeLookY: 0,
+        isConversing: isSpeaking,
+        isSpeaking,
+      };
+    }
+
+    const dx = targetX - pos.x;
+    const dz = targetZ - pos.z;
+    const horizDist = Math.hypot(dx, dz) || 0.01;
+    const worldAngle = Math.atan2(dx, dz);
+    let relYaw = worldAngle - actor.rig.root.rotation.y;
+    while (relYaw > Math.PI) relYaw -= Math.PI * 2;
+    while (relYaw < -Math.PI) relYaw += Math.PI * 2;
+
+    // Only turn head/eyes if partner is within natural front/side field of view
+    if (Math.abs(relYaw) > Math.PI * 0.72) {
+      return {
+        headLookYaw: 0,
+        headLookPitch: 0,
+        eyeLookX: 0,
+        eyeLookY: 0,
+        isConversing: isSpeaking,
+        isSpeaking,
+      };
+    }
+
+    const relPitch = THREE.MathUtils.clamp(
+      -Math.atan2(targetY - myEyeY, horizDist),
+      -0.32,
+      0.32,
+    );
+    const headLookYaw = THREE.MathUtils.clamp(relYaw * 0.72, -0.66, 0.66);
+    const headLookPitch = THREE.MathUtils.clamp(relPitch * 0.75, -0.28, 0.28);
+    const eyeLookX = THREE.MathUtils.clamp(
+      (relYaw - headLookYaw) * 0.85 + relYaw * 0.14,
+      -0.32,
+      0.32,
+    );
+    const eyeLookY = THREE.MathUtils.clamp(relPitch * 0.45, -0.18, 0.18);
+
+    return {
+      headLookYaw,
+      headLookPitch,
+      eyeLookX,
+      eyeLookY,
+      isConversing: strongConv,
+      isSpeaking,
+    };
+  }
+
+  private findNearestTempleBell(maxRange = 4.6): TempleBellInteractive | null {
+    if (!this.playerActor || this.templeBells.length === 0) return null;
+    const pPos = this.playerActor.rig.root.position;
+    let best: TempleBellInteractive | null = null;
+    let bestDistSq = maxRange * maxRange;
+
+    for (let i = 0; i < this.templeBells.length; i++) {
+      const bell = this.templeBells[i];
+      const dx = bell.worldX - pPos.x;
+      const dz = bell.worldZ - pPos.z;
+      const dSq = dx * dx + dz * dz;
+      if (dSq <= bestDistSq) {
+        bestDistSq = dSq;
+        best = bell;
+      }
+    }
+    return best;
+  }
+
+  public tryRingTempleBell(): void {
+    if (
+      this.phase !== 'playing' ||
+      !this.playerActor ||
+      this.playerActor.caught ||
+      this.pendingWinner !== null ||
+      (this.countdownTimer > 0 && this.playerActor.role === 'seeker') ||
+      this.templeBellCooldown > 0
+    ) {
+      return;
+    }
+
+    const bell = this.findNearestTempleBell(4.6);
+    if (!bell) return;
+
+    this.audio.unlock();
+    if (this.playerActor.sitPhase && this.playerActor.sitPhase !== 'none') {
+      this.clearSeatedStateImmediate(this.playerActor);
+    }
+    if (bell.label === 'School Bell') {
+      this.audio.playSchoolBellRing();
+    } else {
+      this.audio.playTempleBellRing();
+    }
+    this.templeBellCooldown = 0.7;
+
+    bell.swingDir *= -1;
+    bell.swingVel = 5.4 * bell.swingDir;
+    bell.waveProgress = 0.001;
+    bell.ringWave.visible = true;
+
+    if (this.playerActor.isHiding) {
+      this.playerActor.isHiding = false;
+    }
+    this.playerActor.tagLungeTimer = 0.36;
+
+    const pPos = this.playerActor.rig.root.position;
+    this.playerActor.rig.root.rotation.y = Math.atan2(
+      bell.worldX - pPos.x,
+      bell.worldZ - pPos.z,
+    );
+
+    this.showBanner(
+      bell.label === 'School Bell'
+        ? '🔔 School Bell rung!'
+        : '🔔 Mandir Ghanta rung!',
+      2.0,
+    );
+    this.emitHud();
+  }
+
+  public trySlapNpc(): void {
+    if (
+      this.phase !== 'playing' ||
+      !this.playerActor ||
+      this.playerActor.caught ||
+      this.pendingWinner !== null ||
+      (this.countdownTimer > 0 && this.playerActor.role === 'seeker') ||
+      this.npcSlapCooldown > 0 ||
+      !this.activeNpcSystem
+    ) {
+      return;
+    }
+
+    const pPos = this.playerActor.rig.root.position;
+    const target = this.activeNpcSystem.findNearestSlappableHuman(
+      pPos.x,
+      pPos.z,
+      2.9,
+    );
+    if (!target) return;
+
+    this.audio.unlock();
+    this.audio.playHiderSlap();
+    this.npcSlapCooldown = 0.85;
+
+    if (this.playerActor.isHiding) {
+      this.playerActor.isHiding = false;
+    }
+    this.playerActor.tagLungeTimer = 0.36;
+    this.playerActor.rig.root.rotation.y = Math.atan2(
+      target.x - pPos.x,
+      target.z - pPos.z,
+    );
+
+    const result = this.activeNpcSystem.slapHumanNpc(
+      target.id,
+      pPos.x,
+      pPos.z,
+    );
+    this.showBanner(
+      result ? `👋 Slapped ${result.label}!` : '👋 Slapped Villager!',
+      1.7,
+    );
+    this.emitHud();
+  }
+
   public setTouchInput(x: number, y: number): void {
     this.touchMoveX = THREE.MathUtils.clamp(x, -1, 1);
     this.touchMoveZ = THREE.MathUtils.clamp(y, -1, 1);
@@ -2132,8 +3124,8 @@ export class ChhupanChhupaiEngine {
 
   private canSeeForTag(seekerPos: THREE.Vector3, hiderPos: THREE.Vector3): boolean {
     if (this.hasLineOfSight(seekerPos, hiderPos)) return true;
-    const seekerHouse = this.findHouseContaining(seekerPos.x, seekerPos.z);
-    const hiderHouse = this.findHouseContaining(hiderPos.x, hiderPos.z);
+    const seekerHouse = this.findHouseContaining(seekerPos.x, seekerPos.z, seekerPos.y);
+    const hiderHouse = this.findHouseContaining(hiderPos.x, hiderPos.z, hiderPos.y);
     return (
       seekerHouse !== null &&
       seekerHouse === hiderHouse &&
@@ -2181,7 +3173,19 @@ export class ChhupanChhupaiEngine {
     hider.rig.root.rotation.y = Math.atan2(sPos.x - hPos.x, sPos.z - hPos.z);
 
     if (hider.isPlayer) {
+      this.clearSeatedStateImmediate(hider);
+      hider.handshakeTimer = 0;
+      hider.handshakePartnerId = null;
       this.spectateTargetId = null;
+      this.spectateCameraMode = 'follow';
+      this.freeCamVerticalInput = 0;
+      this.touchMoveX = 0;
+      this.touchMoveZ = 0;
+      this.cameraController?.exitFreeCamera();
+    } else {
+      this.clearSeatedStateImmediate(hider);
+      hider.handshakeTimer = 0;
+      hider.handshakePartnerId = null;
     }
 
     const remaining = this.getActiveHiders().length;
@@ -2212,9 +3216,17 @@ export class ChhupanChhupaiEngine {
     this.emitHud();
   }
 
-  private findHouseContaining(x: number, z: number): HouseInterior | null {
+  private findHouseContaining(
+    x: number,
+    z: number,
+    y?: number,
+  ): HouseInterior | null {
     for (const h of this.houseInteriors) {
       if (x >= h.minX && x <= h.maxX && z >= h.minZ && z <= h.maxZ) {
+        if (y !== undefined) {
+          if (h.minY !== undefined && y < h.minY) continue;
+          if (h.maxY !== undefined && y > h.maxY) continue;
+        }
         return h;
       }
     }
@@ -2227,7 +3239,7 @@ export class ChhupanChhupaiEngine {
    * the realistic cover-hiding & cautious peeking animation.
    */
   private isNearCover(pos: THREE.Vector3): boolean {
-    if (this.findHouseContaining(pos.x, pos.z) !== null) return true;
+    if (this.findHouseContaining(pos.x, pos.z, pos.y) !== null) return true;
 
     const wallPad = 1.25;
     for (const box of this.colliders.boxes) {
@@ -2294,7 +3306,7 @@ export class ChhupanChhupaiEngine {
     pos: THREE.Vector3,
     isHiding: boolean,
   ): string | null {
-    const insideHouse = this.findHouseContaining(pos.x, pos.z);
+    const insideHouse = this.findHouseContaining(pos.x, pos.z, pos.y);
     if (insideHouse) {
       return isHiding
         ? `Hiding inside ${insideHouse.label}`
@@ -2326,12 +3338,16 @@ export class ChhupanChhupaiEngine {
     const waypoints: Array<{ x: number; z: number }> = [];
 
     const currentPos = actor.rig.root.position;
-    const currentHouse = this.findHouseContaining(currentPos.x, currentPos.z);
+    const currentHouse = this.findHouseContaining(
+      currentPos.x,
+      currentPos.z,
+      currentPos.y,
+    );
     if (currentHouse) {
       waypoints.push({ x: currentHouse.doorX, z: currentHouse.doorZ });
     }
 
-    const destHouse = this.findHouseContaining(spot.x, spot.z);
+    const destHouse = this.findHouseContaining(spot.x, spot.z, 0);
     if (destHouse && (!currentHouse || currentHouse.id !== destHouse.id)) {
       waypoints.push({ x: destHouse.doorX, z: destHouse.doorZ });
     }
@@ -2436,6 +3452,12 @@ export class ChhupanChhupaiEngine {
     }
 
     for (const box of this.colliders.boxes) {
+      if (box.minY !== undefined && pos.y + 1.5 < box.minY) {
+        continue;
+      }
+      if (!box.climbable && box.topY !== undefined && pos.y >= box.topY - 0.08) {
+        continue;
+      }
       if (
         box.climbable &&
         box.topY !== undefined &&
@@ -2506,9 +3528,13 @@ export class ChhupanChhupaiEngine {
   private hasLineOfSight(from: THREE.Vector3, to: THREE.Vector3): boolean {
     _rayStart.set(from.x, from.z);
     _rayEnd.set(to.x, to.z);
+    const rayMinY = Math.min(from.y, to.y) + 0.9;
+    const rayMaxY = Math.max(from.y, to.y) + 1.25;
 
     for (const box of this.colliders.boxes) {
       if (!box.blocksSight) continue;
+      if (box.minY !== undefined && rayMaxY < box.minY) continue;
+      if (box.topY !== undefined && rayMinY > box.topY) continue;
       if (
         segmentIntersectsBox(
           _rayStart.x,
@@ -2617,8 +3643,55 @@ export class ChhupanChhupaiEngine {
     const actor = this.playerActor;
     if (!actor || actor.caught) return;
 
+    if (this.playerSlapCooldown > 0) {
+      this.playerSlapCooldown = Math.max(0, this.playerSlapCooldown - dt);
+    }
+    if (this.playerHandshakeCooldown > 0) {
+      this.playerHandshakeCooldown = Math.max(
+        0,
+        this.playerHandshakeCooldown - dt,
+      );
+    }
+
     if (actor.tagLungeTimer && actor.tagLungeTimer > 0) {
       actor.tagLungeTimer = Math.max(0, actor.tagLungeTimer - dt);
+    }
+
+    if (actor.slapFlinchTimer && actor.slapFlinchTimer > 0) {
+      actor.slapFlinchTimer = Math.max(0, actor.slapFlinchTimer - dt);
+    }
+
+    if (actor.handshakeTimer && actor.handshakeTimer > 0) {
+      actor.handshakeTimer = Math.max(0, actor.handshakeTimer - dt);
+      if (actor.handshakeTimer === 0) {
+        actor.handshakePartnerId = null;
+      }
+    }
+
+    if (actor.expressionOverrideTimer && actor.expressionOverrideTimer > 0) {
+      actor.expressionOverrideTimer = Math.max(
+        0,
+        actor.expressionOverrideTimer - dt,
+      );
+      if (actor.expressionOverrideTimer === 0) {
+        actor.expressionOverride = null;
+      }
+    }
+
+    if (actor.slapKnockVx || actor.slapKnockVz) {
+      const decay = Math.exp(-8.5 * dt);
+      actor.rig.root.position.x += (actor.slapKnockVx ?? 0) * dt;
+      actor.rig.root.position.z += (actor.slapKnockVz ?? 0) * dt;
+      actor.slapKnockVx = (actor.slapKnockVx ?? 0) * decay;
+      actor.slapKnockVz = (actor.slapKnockVz ?? 0) * decay;
+      if (
+        Math.abs(actor.slapKnockVx) < 0.08 &&
+        Math.abs(actor.slapKnockVz) < 0.08
+      ) {
+        actor.slapKnockVx = 0;
+        actor.slapKnockVz = 0;
+      }
+      this.resolveCollisions(actor.rig.root.position, CHAR_RADIUS);
     }
 
     if (actor.role === 'seeker' && this.countdownTimer > 0) {
@@ -2626,6 +3699,7 @@ export class ChhupanChhupaiEngine {
       this.lastForwardInput = 0;
       this.lastRightInput = 0;
       this.lastPlayerAnimState = 'counting_eyes_closed';
+      this.lastPlayerExpression = 'counting';
       actor.rig.updateAnimation({
         dt,
         moveSpeed: 0,
@@ -2652,13 +3726,154 @@ export class ChhupanChhupaiEngine {
     this.lastForwardInput = forwardInput;
     this.lastRightInput = rightInput;
 
+    // Handle smooth sitting-down / seated / getting-up states on charpais & benches
+    if (actor.sitPhase && actor.sitPhase !== 'none' && actor.activeSeat) {
+      const seat = actor.activeSeat;
+      const pos = actor.rig.root.position;
+
+      // Moving joystick or WASD while seated smoothly triggers standing up!
+      if (inputMag > 0.14 && actor.sitPhase !== 'stand_up') {
+        this.beginStandUp(actor);
+      }
+
+      actor.sitTimer = (actor.sitTimer ?? 0) + dt;
+      actor.lastMoveSpeed = 0;
+
+      if (actor.sitPhase === 'sit_down') {
+        const progress = Math.min(1, actor.sitTimer / SIT_DOWN_DURATION);
+        pos.x = THREE.MathUtils.damp(pos.x, seat.x, 12, dt);
+        pos.z = THREE.MathUtils.damp(pos.z, seat.z, 12, dt);
+        pos.y = THREE.MathUtils.damp(pos.y, 0, 14, dt);
+        let diff = seat.rotY - actor.rig.root.rotation.y;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        actor.rig.root.rotation.y += diff * (1 - Math.exp(-12 * dt));
+
+        if (progress >= 1) {
+          actor.sitPhase = 'sitting';
+          actor.sitTimer = 0;
+          pos.x = seat.x;
+          pos.z = seat.z;
+          actor.rig.root.rotation.y = seat.rotY;
+        }
+
+        const gaze = this.computeConversationLook(actor);
+        const expr = this.resolveActorFacialExpression(actor, 'sit_down');
+        this.lastPlayerAnimState = 'sit_down';
+        this.lastPlayerExpression = expr;
+        actor.rig.updateAnimation({
+          dt,
+          moveSpeed: 0,
+          state: 'sit_down',
+          expression: expr,
+          eyeLookX: gaze.eyeLookX,
+          eyeLookY: gaze.eyeLookY,
+          headLookYaw: gaze.headLookYaw,
+          headLookPitch: gaze.headLookPitch,
+          isConversing: gaze.isConversing,
+          isSpeaking: gaze.isSpeaking,
+          interactionProgress: progress,
+          seatY: seat.seatY,
+          airHeight: 0,
+        });
+        return;
+      }
+
+      if (actor.sitPhase === 'sitting') {
+        pos.x = THREE.MathUtils.damp(pos.x, seat.x, 14, dt);
+        pos.z = THREE.MathUtils.damp(pos.z, seat.z, 14, dt);
+        pos.y = 0;
+        let diff = seat.rotY - actor.rig.root.rotation.y;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        actor.rig.root.rotation.y += diff * (1 - Math.exp(-12 * dt));
+
+        const gaze = this.computeConversationLook(actor);
+        const sittingState: CharacterAnimState =
+          actor.activeEmote && actor.emoteTimer && actor.emoteTimer > 0
+            ? actor.activeEmote === 'laugh' || actor.activeEmote === 'surprise'
+              ? 'sitting'
+              : emoteToAnimState(actor.activeEmote)
+            : 'sitting';
+        const expr =
+          actor.activeEmote === 'laugh' && (actor.emoteTimer ?? 0) > 0
+            ? 'laughing'
+            : actor.activeEmote === 'surprise' && (actor.emoteTimer ?? 0) > 0
+              ? 'surprise'
+              : this.resolveActorFacialExpression(actor, sittingState);
+        this.lastPlayerAnimState = sittingState;
+        this.lastPlayerExpression = expr;
+        actor.rig.updateAnimation({
+          dt,
+          moveSpeed: 0,
+          state: sittingState,
+          expression: expr,
+          eyeLookX: gaze.eyeLookX,
+          eyeLookY: gaze.eyeLookY,
+          headLookYaw: gaze.headLookYaw,
+          headLookPitch: gaze.headLookPitch,
+          isConversing: gaze.isConversing,
+          isSpeaking: gaze.isSpeaking,
+          interactionProgress: 1,
+          seatY: seat.seatY,
+          airHeight: 0,
+        });
+        return;
+      }
+
+      if (actor.sitPhase === 'stand_up') {
+        const progress = Math.min(1, actor.sitTimer / STAND_UP_DURATION);
+        const standTargetX =
+          actor.preSitPos?.x ?? seat.x + Math.sin(seat.rotY) * 0.85;
+        const standTargetZ =
+          actor.preSitPos?.z ?? seat.z + Math.cos(seat.rotY) * 0.85;
+        pos.x = THREE.MathUtils.damp(pos.x, standTargetX, 10, dt);
+        pos.z = THREE.MathUtils.damp(pos.z, standTargetZ, 10, dt);
+        pos.y = 0;
+
+        if (progress >= 1 || (inputMag > 0.25 && progress >= 0.45)) {
+          actor.sitPhase = 'none';
+          actor.sitTimer = 0;
+          actor.activeSeat = null;
+          actor.preSitPos = null;
+          this.resolveCollisions(pos, CHAR_RADIUS);
+          this.emitHud();
+        } else {
+          const gaze = this.computeConversationLook(actor);
+          const expr = this.resolveActorFacialExpression(actor, 'stand_up');
+          this.lastPlayerAnimState = 'stand_up';
+          this.lastPlayerExpression = expr;
+          actor.rig.updateAnimation({
+            dt,
+            moveSpeed: 0,
+            state: 'stand_up',
+            expression: expr,
+            eyeLookX: gaze.eyeLookX,
+            eyeLookY: gaze.eyeLookY,
+            headLookYaw: gaze.headLookYaw,
+            headLookPitch: gaze.headLookPitch,
+            isConversing: gaze.isConversing,
+            isSpeaking: gaze.isSpeaking,
+            interactionProgress: progress,
+            seatY: seat.seatY,
+            airHeight: 0,
+          });
+          return;
+        }
+      }
+    }
+
     let actualSpeed = 0;
 
     if (inputMag > 0.05) {
-      // Cancel local emote cleanly as soon as the player starts walking/running
+      // Cancel local emote & handshake cleanly as soon as the player starts walking/running
       if (actor.activeEmote) {
         actor.activeEmote = null;
         actor.emoteTimer = 0;
+      }
+      if (actor.handshakeTimer && actor.handshakeTimer > 0) {
+        actor.handshakeTimer = 0;
+        actor.handshakePartnerId = null;
       }
       const camYaw = this.cameraController?.getCameraYaw() ?? 0;
       const forwardX = -Math.sin(camYaw);
@@ -2698,6 +3913,11 @@ export class ChhupanChhupaiEngine {
     const pos = actor.rig.root.position;
     let supportY = this.resolveCollisions(pos, CHAR_RADIUS);
 
+    if (actor.grounded && supportY > pos.y && supportY <= pos.y + 0.28) {
+      pos.y = THREE.MathUtils.damp(pos.y, supportY, 24, dt);
+      if (supportY - pos.y < 0.012) pos.y = supportY;
+    }
+
     if (actor.grounded && pos.y > supportY + 0.05) {
       actor.grounded = false;
       actor.vy = 0;
@@ -2719,24 +3939,42 @@ export class ChhupanChhupaiEngine {
     const animState: CharacterAnimState =
       actor.tagLungeTimer && actor.tagLungeTimer > 0
         ? 'tag_lunge'
-        : !actor.grounded
-          ? 'jump'
-          : actor.activeEmote &&
-              actor.emoteTimer &&
-              actor.emoteTimer > 0 &&
-              actualSpeed <= 0.15
-            ? emoteToAnimState(actor.activeEmote)
-            : this.resolveMovementAnimState(
-                pos,
-                actualSpeed,
-                actor.isHiding,
-              );
+        : actor.handshakeTimer && actor.handshakeTimer > 0 && actualSpeed <= 0.15
+          ? 'handshake'
+          : !actor.grounded
+            ? 'jump'
+            : actor.activeEmote &&
+                actor.emoteTimer &&
+                actor.emoteTimer > 0 &&
+                actualSpeed <= 0.15
+              ? emoteToAnimState(actor.activeEmote)
+              : this.resolveMovementAnimState(
+                  pos,
+                  actualSpeed,
+                  actor.isHiding,
+                );
+
+    const interactionProgress =
+      animState === 'handshake' && actor.handshakeTimer
+        ? 1 - actor.handshakeTimer / HANDSHAKE_DURATION
+        : 0;
+    const gaze = this.computeConversationLook(actor);
+    const expr = this.resolveActorFacialExpression(actor, animState);
+
     this.lastPlayerAnimState = animState;
+    this.lastPlayerExpression = expr;
     actor.rig.updateAnimation({
       dt,
       moveSpeed: actualSpeed,
       state: animState,
-      expression: this.resolveActorFacialExpression(actor, animState),
+      expression: expr,
+      eyeLookX: gaze.eyeLookX,
+      eyeLookY: gaze.eyeLookY,
+      headLookYaw: gaze.headLookYaw,
+      headLookPitch: gaze.headLookPitch,
+      isConversing: gaze.isConversing,
+      isSpeaking: gaze.isSpeaking,
+      interactionProgress,
       airHeight,
     });
   }
@@ -2750,6 +3988,49 @@ export class ChhupanChhupaiEngine {
 
       hider.retargetCooldown = Math.max(0, hider.retargetCooldown - dt);
       const pos = hider.rig.root.position;
+      if (hider.slapFlinchTimer && hider.slapFlinchTimer > 0) {
+        hider.slapFlinchTimer = Math.max(0, hider.slapFlinchTimer - dt);
+      }
+      if (hider.handshakeTimer && hider.handshakeTimer > 0) {
+        hider.handshakeTimer = Math.max(0, hider.handshakeTimer - dt);
+        if (hider.handshakeTimer === 0) {
+          hider.handshakePartnerId = null;
+        }
+      }
+      if (hider.expressionOverrideTimer && hider.expressionOverrideTimer > 0) {
+        hider.expressionOverrideTimer = Math.max(
+          0,
+          hider.expressionOverrideTimer - dt,
+        );
+        if (hider.expressionOverrideTimer === 0) {
+          hider.expressionOverride = null;
+        }
+      }
+      if (hider.slapKnockVx || hider.slapKnockVz) {
+        const decay = Math.exp(-8.5 * dt);
+        pos.x += (hider.slapKnockVx ?? 0) * dt;
+        pos.z += (hider.slapKnockVz ?? 0) * dt;
+        hider.slapKnockVx = (hider.slapKnockVx ?? 0) * decay;
+        hider.slapKnockVz = (hider.slapKnockVz ?? 0) * decay;
+        if (
+          Math.abs(hider.slapKnockVx) < 0.08 &&
+          Math.abs(hider.slapKnockVz) < 0.08
+        ) {
+          hider.slapKnockVx = 0;
+          hider.slapKnockVz = 0;
+        }
+        this.resolveCollisions(pos, CHAR_RADIUS);
+      }
+      if (!hider.grounded || pos.y > 0) {
+        hider.vy -= GRAVITY * dt;
+        pos.y += hider.vy * dt;
+        if (pos.y <= 0) {
+          pos.y = 0;
+          hider.vy = 0;
+          hider.grounded = true;
+        }
+      }
+
       const distToSeeker = pos.distanceTo(seekerPos);
 
       if (
@@ -2758,6 +4039,8 @@ export class ChhupanChhupaiEngine {
         distToSeeker < AI_HIDER_FLEE_RANGE &&
         this.hasLineOfSight(seekerPos, pos)
       ) {
+        hider.handshakeTimer = 0;
+        hider.handshakePartnerId = null;
         let bestIdx = hider.targetSpotIndex;
         let bestScore = -1;
         for (let i = 0; i < this.hidingSpots.length; i++) {
@@ -2775,7 +4058,12 @@ export class ChhupanChhupaiEngine {
       }
 
       let movedSpeed = 0;
-      if (hider.waypoints.length > 0) {
+      if (
+        (hider.slapFlinchTimer && hider.slapFlinchTimer > 0.25) ||
+        (hider.handshakeTimer && hider.handshakeTimer > 0)
+      ) {
+        movedSpeed = 0;
+      } else if (hider.waypoints.length > 0) {
         const next = hider.waypoints[0];
         const dNext = Math.hypot(next.x - pos.x, next.z - pos.z);
         if (dNext < 0.7) {
@@ -2791,21 +4079,34 @@ export class ChhupanChhupaiEngine {
           );
         }
       } else {
-        hider.isHiding = true;
+        hider.isHiding = !(hider.slapFlinchTimer && hider.slapFlinchTimer > 0);
       }
 
       hider.lastMoveSpeed = movedSpeed;
 
-      const animState = this.resolveMovementAnimState(
-        pos,
-        movedSpeed,
-        hider.isHiding,
-      );
+      const animState: CharacterAnimState = !hider.grounded
+        ? 'jump'
+        : hider.handshakeTimer && hider.handshakeTimer > 0
+          ? 'handshake'
+          : this.resolveMovementAnimState(pos, movedSpeed, hider.isHiding);
+      const interactionProgress =
+        animState === 'handshake' && hider.handshakeTimer
+          ? 1 - hider.handshakeTimer / HANDSHAKE_DURATION
+          : 0;
+      const gaze = this.computeConversationLook(hider);
       hider.rig.updateAnimation({
         dt,
         moveSpeed: movedSpeed,
         state: animState,
         expression: this.resolveActorFacialExpression(hider, animState),
+        eyeLookX: gaze.eyeLookX,
+        eyeLookY: gaze.eyeLookY,
+        headLookYaw: gaze.headLookYaw,
+        headLookPitch: gaze.headLookPitch,
+        isConversing: gaze.isConversing,
+        isSpeaking: gaze.isSpeaking,
+        interactionProgress,
+        airHeight: Math.max(0, pos.y),
       });
     }
   }
@@ -2860,7 +4161,7 @@ export class ChhupanChhupaiEngine {
     for (const hider of activeHiders) {
       const hPos = hider.rig.root.position;
       const dist = seekerPos.distanceTo(hPos);
-      const insideHouse = this.findHouseContaining(hPos.x, hPos.z) !== null;
+      const insideHouse = this.findHouseContaining(hPos.x, hPos.z, hPos.y) !== null;
       const maxSight = hider.isHiding
         ? (insideHouse ? 4.2 : SIGHT_RANGE_HIDING) + sightBonus * 0.32
         : SIGHT_RANGE_STANDING + sightBonus;
@@ -3028,6 +4329,17 @@ export class ChhupanChhupaiEngine {
     }
   }
 
+  private isActivelySpectating(): boolean {
+    return Boolean(
+      this.phase === 'playing' &&
+        this.playerActor &&
+        this.playerActor.role === 'hider' &&
+        this.playerActor.caught &&
+        this.playerActor.caughtAnimElapsed >= CAUGHT_ANIM_DURATION &&
+        this.getSpectateTargets().length > 0,
+    );
+  }
+
   private getSpectateTargets(): ParticipantActor[] {
     const candidates: ParticipantActor[] = [...this.getActiveHiders()];
     if (this.seekerActor && this.seekerActor !== this.playerActor) {
@@ -3036,8 +4348,78 @@ export class ChhupanChhupaiEngine {
     return candidates;
   }
 
+  public setFreeCamVerticalInput(dir: number): void {
+    this.freeCamVerticalInput = THREE.MathUtils.clamp(dir, -1, 1);
+  }
+
+  public setSpectateCameraMode(mode: SpectateCameraMode): void {
+    if (
+      this.phase !== 'playing' ||
+      !this.playerActor ||
+      this.playerActor.role !== 'hider' ||
+      !this.playerActor.caught
+    ) {
+      return;
+    }
+    if (this.spectateCameraMode === mode) return;
+
+    this.spectateCameraMode = mode;
+    this.touchMoveX = 0;
+    this.touchMoveZ = 0;
+    this.freeCamVerticalInput = 0;
+
+    if (mode === 'free') {
+      this.cameraController?.setFullScreenTouchLook(false);
+      this.cameraController?.enterFreeCamera(
+        this.camera,
+        this.colliders.worldRadius,
+      );
+    } else {
+      this.cameraController?.exitFreeCamera();
+      this.cameraController?.setFullScreenTouchLook(true);
+      const focus = this.getCameraFocusActor();
+      if (focus) {
+        this.cameraController?.recenterBehind(focus.rig.root.rotation.y);
+      }
+    }
+    this.emitHud();
+  }
+
+  public toggleSpectateCameraMode(): void {
+    this.setSpectateCameraMode(
+      this.spectateCameraMode === 'free' ? 'follow' : 'free',
+    );
+  }
+
+  public setSpectateTarget(actorId: string): void {
+    if (
+      this.phase !== 'playing' ||
+      !this.playerActor ||
+      this.playerActor.role !== 'hider' ||
+      !this.playerActor.caught
+    ) {
+      return;
+    }
+    const candidates = this.getSpectateTargets();
+    const target = candidates.find((a) => a.id === actorId);
+    if (!target) return;
+
+    this.spectateTargetId = target.id;
+    if (this.spectateCameraMode === 'free') {
+      this.spectateCameraMode = 'follow';
+      this.touchMoveX = 0;
+      this.touchMoveZ = 0;
+      this.freeCamVerticalInput = 0;
+      this.cameraController?.exitFreeCamera();
+      this.cameraController?.setFullScreenTouchLook(true);
+    }
+    this.cameraController?.recenterBehind(target.rig.root.rotation.y);
+    this.emitHud();
+  }
+
   public cycleSpectateTarget(delta: number): void {
     if (
+      this.phase !== 'playing' ||
       !this.playerActor ||
       this.playerActor.role !== 'hider' ||
       !this.playerActor.caught
@@ -3055,6 +4437,14 @@ export class ChhupanChhupaiEngine {
       (baseIdx + delta + candidates.length * 4) % candidates.length;
     const nextActor = candidates[nextIdx];
     this.spectateTargetId = nextActor.id;
+    if (this.spectateCameraMode === 'free') {
+      this.spectateCameraMode = 'follow';
+      this.touchMoveX = 0;
+      this.touchMoveZ = 0;
+      this.freeCamVerticalInput = 0;
+      this.cameraController?.exitFreeCamera();
+      this.cameraController?.setFullScreenTouchLook(true);
+    }
     this.cameraController?.recenterBehind(nextActor.rig.root.rotation.y);
     this.emitHud();
   }
@@ -3150,6 +4540,81 @@ export class ChhupanChhupaiEngine {
       return;
     }
 
+    const activelySpectating = this.isActivelySpectating();
+
+    if (
+      activelySpectating &&
+      this.spectateCameraMode === 'free' &&
+      this.cameraController
+    ) {
+      if (!this.cameraController.isFreeCameraActive()) {
+        this.cameraController.setFullScreenTouchLook(false);
+        this.cameraController.enterFreeCamera(
+          this.camera,
+          this.colliders.worldRadius,
+        );
+      }
+
+      let fx = this.touchMoveX;
+      let fz = this.touchMoveZ;
+      if (this.keysPressed.has('KeyW') || this.keysPressed.has('ArrowUp')) fz -= 1;
+      if (this.keysPressed.has('KeyS') || this.keysPressed.has('ArrowDown')) fz += 1;
+      if (this.keysPressed.has('KeyA') || this.keysPressed.has('ArrowLeft')) fx -= 1;
+      if (this.keysPressed.has('KeyD') || this.keysPressed.has('ArrowRight')) fx += 1;
+
+      let fy = this.freeCamVerticalInput;
+      if (this.keysPressed.has('Space') || this.keysPressed.has('KeyQ')) fy += 1;
+      if (
+        this.keysPressed.has('ShiftLeft') ||
+        this.keysPressed.has('ShiftRight') ||
+        this.keysPressed.has('KeyC')
+      ) {
+        fy -= 1;
+      }
+
+      this.cameraController.updateFreeCamera(
+        this.camera,
+        {
+          forward: -fz,
+          right: fx,
+          vertical: fy,
+          worldRadius: this.colliders.worldRadius,
+        },
+        dt,
+      );
+
+      this.cameraController.getFreeCameraPosition(_freeCamPos);
+      if (this.sunLight) {
+        this.sunLight.target.position.set(_freeCamPos.x, 0, _freeCamPos.z);
+        this.sunLight.position.set(_freeCamPos.x + 26, 34, _freeCamPos.z + 18);
+      }
+      if (this.faceFillLight) {
+        this.faceFillLight.target.position.set(_freeCamPos.x, 1.0, _freeCamPos.z);
+        this.faceFillLight.position.set(
+          _freeCamPos.x + 2.5,
+          Math.max(4.0, _freeCamPos.y + 1.5),
+          _freeCamPos.z + 2.5,
+        );
+      }
+      const hoveredHouse =
+        _freeCamPos.y < 14
+          ? this.findHouseContaining(
+              _freeCamPos.x,
+              _freeCamPos.z,
+              Math.max(0, _freeCamPos.y - 2.4),
+            )
+          : null;
+      this.updateHouseRoofVisibility(hoveredHouse);
+      return;
+    }
+
+    if (this.cameraController) {
+      if (this.cameraController.isFreeCameraActive()) {
+        this.cameraController.exitFreeCamera();
+      }
+      this.cameraController.setFullScreenTouchLook(activelySpectating);
+    }
+
     const focusActor = this.getCameraFocusActor();
     if (!focusActor) return;
     const p = focusActor.rig.root.position;
@@ -3171,7 +4636,7 @@ export class ChhupanChhupaiEngine {
       );
     }
 
-    const activeHouse = this.findHouseContaining(p.x, p.z);
+    const activeHouse = this.findHouseContaining(p.x, p.z, p.y);
     this.updateHouseRoofVisibility(activeHouse);
 
     if (this.cameraController) {
@@ -3259,6 +4724,46 @@ export class ChhupanChhupaiEngine {
       const mat = this.pondWater.material as THREE.MeshPhysicalMaterial;
       mat.roughness = 0.13 + Math.sin(this.elapsed * 1.8) * 0.03;
     }
+
+    this.templeBellCooldown = Math.max(0, this.templeBellCooldown - dt);
+    this.npcSlapCooldown = Math.max(0, this.npcSlapCooldown - dt);
+
+    for (let i = 0; i < this.templeBells.length; i++) {
+      const bell = this.templeBells[i];
+      if (
+        Math.abs(bell.swingAngle) > 0.0008 ||
+        Math.abs(bell.swingVel) > 0.0008
+      ) {
+        const accel = -18.5 * bell.swingAngle - 1.65 * bell.swingVel;
+        bell.swingVel += accel * dt;
+        bell.swingAngle += bell.swingVel * dt;
+        bell.pivot.rotation.x = bell.swingAngle;
+        bell.clapper.rotation.x =
+          bell.swingAngle * 0.45 - bell.swingVel * 0.045;
+      } else if (bell.pivot.rotation.x !== 0 || bell.clapper.rotation.x !== 0) {
+        bell.swingAngle = 0;
+        bell.swingVel = 0;
+        bell.pivot.rotation.x = 0;
+        bell.clapper.rotation.x = 0;
+      }
+
+      if (bell.waveProgress < 1) {
+        bell.waveProgress = Math.min(1, bell.waveProgress + dt * 1.45);
+        const s = 1 + bell.waveProgress * 3.2;
+        bell.ringWave.scale.set(s, s, 1);
+        const waveMat = bell.ringWave.material as THREE.MeshBasicMaterial;
+        waveMat.opacity = (1 - bell.waveProgress) * 0.72;
+        bell.ringWave.visible = bell.waveProgress < 1;
+      }
+    }
+
+    if (this.activeNpcSystem) {
+      const activePlayerPos =
+        this.playerActor && !this.playerActor.caught
+          ? this.playerActor.rig.root.position
+          : null;
+      this.activeNpcSystem.update(dt, this.camera.position, activePlayerPos);
+    }
   }
 
   private emitHud(webglError: string | null = null): void {
@@ -3269,6 +4774,17 @@ export class ChhupanChhupaiEngine {
     let nearestDistance = 99;
     let canTag = false;
     let tagTargetName: string | null = null;
+    let canSlapHider = false;
+    let slapTargetName: string | null = null;
+    let canSlapNpc = false;
+    let slapNpcLabel: string | null = null;
+    let canRingTempleBell = false;
+    let templeBellLabel: string | null = null;
+    let canHandshake = false;
+    let handshakeTargetName: string | null = null;
+    let canSit = false;
+    let isSitting = false;
+    let seatLabel: string | null = null;
 
     if (this.playerActor && this.seekerActor) {
       if (this.playerActor.role === 'seeker') {
@@ -3300,6 +4816,66 @@ export class ChhupanChhupaiEngine {
             this.seekerActor.rig.root.position,
           );
         }
+        if (
+          this.phase === 'playing' &&
+          !this.playerActor.caught &&
+          this.pendingWinner === null &&
+          this.playerSlapCooldown <= 0
+        ) {
+          const slapTarget = this.findNearestSlapTarget();
+          if (slapTarget) {
+            canSlapHider = true;
+            slapTargetName = slapTarget.name;
+          }
+        }
+      }
+    }
+
+    if (
+      this.playerActor &&
+      this.phase === 'playing' &&
+      !this.playerActor.caught &&
+      this.pendingWinner === null &&
+      !(this.countdownTimer > 0 && this.playerActor.role === 'seeker')
+    ) {
+      if (this.templeBellCooldown <= 0) {
+        const bell = this.findNearestTempleBell(4.6);
+        if (bell) {
+          canRingTempleBell = true;
+          templeBellLabel = bell.label;
+        }
+      }
+      if (this.npcSlapCooldown <= 0 && this.activeNpcSystem) {
+        const pPos = this.playerActor.rig.root.position;
+        const npcTarget = this.activeNpcSystem.findNearestSlappableHuman(
+          pPos.x,
+          pPos.z,
+          2.9,
+        );
+        if (npcTarget) {
+          canSlapNpc = true;
+          slapNpcLabel = npcTarget.label;
+        }
+      }
+      if (this.playerHandshakeCooldown <= 0) {
+        const hsTarget = this.findNearestHandshakeTarget(HANDSHAKE_RANGE);
+        if (hsTarget) {
+          canHandshake = true;
+          handshakeTargetName = hsTarget.name;
+        }
+      }
+      if (
+        this.playerActor.sitPhase === 'sitting' ||
+        this.playerActor.sitPhase === 'sit_down'
+      ) {
+        isSitting = true;
+        seatLabel = this.playerActor.activeSeat?.label ?? 'Seat';
+      } else if (this.playerActor.sitPhase !== 'stand_up') {
+        const seat = this.findNearestAvailableSeat(SIT_RANGE);
+        if (seat) {
+          canSit = true;
+          seatLabel = seat.label;
+        }
       }
     }
 
@@ -3308,16 +4884,29 @@ export class ChhupanChhupaiEngine {
     const countdownSeconds = Math.max(0, Math.ceil(this.countdownTimer));
 
     const focusActor = this.getCameraFocusActor();
-    const isSpectating = Boolean(
-      this.playerActor?.role === 'hider' &&
-        this.playerActor.caught &&
-        focusActor &&
-        focusActor !== this.playerActor,
-    );
-    const spectatingName = isSpectating && focusActor ? focusActor.name : null;
-    const spectatingRole = isSpectating && focusActor ? focusActor.role : null;
-    const spectatingCanCycle =
-      isSpectating && this.getSpectateTargets().length > 1;
+    const isSpectating = this.isActivelySpectating();
+    const spectateCandidates = isSpectating ? this.getSpectateTargets() : [];
+    const spectateTargets: SpectateTargetInfo[] = spectateCandidates.map((a) => ({
+      id: a.id,
+      name: a.name,
+      role: a.role,
+    }));
+    const spectatingTargetId =
+      isSpectating && focusActor && focusActor !== this.playerActor
+        ? focusActor.id
+        : null;
+    const spectatingName =
+      isSpectating && focusActor && focusActor !== this.playerActor
+        ? focusActor.name
+        : null;
+    const spectatingRole =
+      isSpectating && focusActor && focusActor !== this.playerActor
+        ? focusActor.role
+        : null;
+    const spectatingCanCycle = isSpectating && spectateTargets.length > 1;
+    const spectateCameraMode: SpectateCameraMode = isSpectating
+      ? this.spectateCameraMode
+      : 'follow';
 
     const hidingSpotLabel =
       this.playerActor?.role === 'hider' && !this.playerActor.caught
@@ -3361,6 +4950,10 @@ export class ChhupanChhupaiEngine {
           }
         : null;
 
+    const spectateTargetsKey = spectateTargets
+      .map((t) => `${t.id}:${t.role}:${t.name}`)
+      .join(',');
+
     const key = [
       this.phase,
       this.selectedRole,
@@ -3371,11 +4964,27 @@ export class ChhupanChhupaiEngine {
       countdownSeconds,
       this.playerActor?.isHiding ?? false,
       this.playerActor?.caught ?? false,
+      this.exploreMode,
+      isSpectating,
+      spectatingTargetId ?? '',
       spectatingName ?? '',
       spectatingRole ?? '',
       spectatingCanCycle,
+      spectateCameraMode,
+      spectateTargetsKey,
       canTag,
       tagTargetName ?? '',
+      canSlapHider,
+      slapTargetName ?? '',
+      canSlapNpc,
+      slapNpcLabel ?? '',
+      canRingTempleBell,
+      templeBellLabel ?? '',
+      canHandshake,
+      handshakeTargetName ?? '',
+      canSit,
+      isSitting,
+      seatLabel ?? '',
       roundedDist,
       this.seekerMode,
       hidingSpotLabel ?? '',
@@ -3408,11 +5017,27 @@ export class ChhupanChhupaiEngine {
       countdownSeconds,
       isHiding: this.playerActor?.isHiding ?? false,
       playerCaught: this.playerActor?.caught ?? false,
+      isExploringSchool: this.exploreMode,
+      isSpectating,
+      spectatingTargetId,
       spectatingName,
       spectatingRole,
       spectatingCanCycle,
+      spectateCameraMode,
+      spectateTargets,
       canTag,
       tagTargetName,
+      canSlapHider,
+      slapTargetName,
+      canSlapNpc,
+      slapNpcLabel,
+      canRingTempleBell,
+      templeBellLabel,
+      canHandshake,
+      handshakeTargetName,
+      canSit,
+      isSitting,
+      seatLabel,
       nearestDistance: roundedDist,
       seekerMode: this.seekerMode,
       hidingSpotLabel,
@@ -3439,6 +5064,12 @@ export class ChhupanChhupaiEngine {
     this.winner = winner;
     this.pendingWinner = null;
     this.eventBanner = null;
+    this.spectateCameraMode = 'follow';
+    this.freeCamVerticalInput = 0;
+    this.touchMoveX = 0;
+    this.touchMoveZ = 0;
+    this.cameraController?.exitFreeCamera();
+    this.cameraController?.setFullScreenTouchLook(false);
 
     const playerWon =
       winner !== null &&
@@ -3472,6 +5103,18 @@ export class ChhupanChhupaiEngine {
       animState === 'caught_funny'
     ) {
       return undefined;
+    }
+
+    if (
+      actor.expressionOverride &&
+      actor.expressionOverrideTimer &&
+      actor.expressionOverrideTimer > 0
+    ) {
+      return actor.expressionOverride;
+    }
+
+    if (actor.slapFlinchTimer && actor.slapFlinchTimer > 0) {
+      return 'surprise';
     }
 
     if (this.phase === 'ended' && this.winner !== null) {
@@ -3614,6 +5257,11 @@ export class ChhupanChhupaiEngine {
             this.emitOnlineLocalState();
           }
           this.emitHud();
+        } else if (this.exploreMode) {
+          this.updatePlayer(dt);
+          this.updateNameplatesAndChatBubbles(dt);
+          this.updateTagRings(dt);
+          this.emitHud();
         } else if (this.pendingWinner !== null) {
           // Play out final hider's funny caught animation before ending screen
           this.pendingEndTimer = Math.max(0, this.pendingEndTimer - dt);
@@ -3706,6 +5354,9 @@ export class ChhupanChhupaiEngine {
         this.playerActor && !this.playerActor.caught
           ? this.lastPlayerAnimState
           : 'idle';
+      const listenerY = this.playerActor
+        ? this.playerActor.rig.root.position.y
+        : this.camera.position.y;
       this.audio.update(
         dt,
         this.phase,
@@ -3713,6 +5364,7 @@ export class ChhupanChhupaiEngine {
         listenerZ,
         activeAnimState,
         activeMoveSpeed,
+        listenerY,
       );
 
       this.updateCamera(dt);
@@ -3778,6 +5430,11 @@ export class ChhupanChhupaiEngine {
         'KeyA',
         'KeyS',
         'KeyD',
+        'KeyQ',
+        'KeyC',
+        'Space',
+        'ShiftLeft',
+        'ShiftRight',
         'ArrowUp',
         'ArrowDown',
         'ArrowLeft',
@@ -3789,18 +5446,41 @@ export class ChhupanChhupaiEngine {
 
     if (this.phase !== 'playing') return;
 
-    if (
-      this.playerActor?.role === 'hider' &&
-      this.playerActor.caught &&
-      !e.repeat
-    ) {
-      if (e.code === 'ArrowLeft' || e.code === 'BracketLeft') {
-        this.cycleSpectateTarget(-1);
-        return;
-      } else if (e.code === 'ArrowRight' || e.code === 'BracketRight') {
-        this.cycleSpectateTarget(1);
-        return;
+    if (this.playerActor?.role === 'hider' && this.playerActor.caught) {
+      if (!e.repeat) {
+        if (e.code === 'KeyF' || e.code === 'KeyV') {
+          e.preventDefault();
+          this.toggleSpectateCameraMode();
+          return;
+        }
+        if (e.code === 'BracketLeft') {
+          this.cycleSpectateTarget(-1);
+          return;
+        }
+        if (e.code === 'BracketRight') {
+          this.cycleSpectateTarget(1);
+          return;
+        }
+        if (this.spectateCameraMode === 'follow') {
+          if (e.code === 'ArrowLeft') {
+            this.cycleSpectateTarget(-1);
+            return;
+          }
+          if (e.code === 'ArrowRight') {
+            this.cycleSpectateTarget(1);
+            return;
+          }
+        }
+        if (e.code === 'KeyR') {
+          this.recenterCamera();
+          return;
+        }
       }
+      if (e.code === 'Space') {
+        e.preventDefault();
+      }
+      // Strictly block hide, jump, tag, and slap actions for spectators
+      return;
     }
 
     if (
@@ -3811,9 +5491,34 @@ export class ChhupanChhupaiEngine {
     } else if (e.code === 'Space' && !e.repeat) {
       e.preventDefault();
       this.triggerJump();
+    } else if (e.code === 'KeyB' && !e.repeat) {
+      e.preventDefault();
+      this.tryRingTempleBell();
     } else if (e.code === 'KeyE' && !e.repeat) {
       e.preventDefault();
-      this.tryTag();
+      if (this.playerActor?.role === 'seeker') {
+        if (this.findNearestTagTarget()) {
+          this.tryTag();
+        } else if (this.findNearestTempleBell()) {
+          this.tryRingTempleBell();
+        } else {
+          this.trySlapNpc();
+        }
+      } else if (this.playerActor?.role === 'hider') {
+        if (this.findNearestSlapTarget()) {
+          this.trySlapHider();
+        } else if (this.findNearestTempleBell()) {
+          this.tryRingTempleBell();
+        } else {
+          this.trySlapNpc();
+        }
+      }
+    } else if (e.code === 'KeyF' && !e.repeat) {
+      e.preventDefault();
+      this.tryHandshake();
+    } else if (e.code === 'KeyG' && !e.repeat) {
+      e.preventDefault();
+      this.tryToggleSit();
     } else if (e.code === 'KeyR' && !e.repeat) {
       this.recenterCamera();
     }
@@ -3827,6 +5532,7 @@ export class ChhupanChhupaiEngine {
     this.keysPressed.clear();
     this.touchMoveX = 0;
     this.touchMoveZ = 0;
+    this.freeCamVerticalInput = 0;
     this.cameraController?.resetPointerState();
   };
 
@@ -3920,6 +5626,12 @@ export class ChhupanChhupaiEngine {
     };
 
     collectDisposable(this.scene);
+    for (const npcSys of this.npcCache.values()) {
+      npcSys.dispose();
+    }
+    this.npcCache.clear();
+    this.activeNpcSystem = null;
+
     for (const cached of this.levelCache.values()) {
       collectDisposable(cached.group);
     }

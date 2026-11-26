@@ -13,15 +13,17 @@ import {
   createMapContext,
 } from './mapHelpers';
 import { VillageTextureSet } from './textures';
-import { VillageBuildResult } from './village';
+import { TempleBellInteractive } from './types';
+import { buildHandPump, VillageBuildResult } from './village';
 
 // ============================================================================
-// LEVEL 2 — SCHOOL CAMPUS (Old Village Prathmik Vidyalaya)
+// LEVEL 2 — SCHOOL CAMPUS (Old 1995 Village Prathmik Vidyalaya)
 // ============================================================================
 export function buildSchoolCampusMap(
   textures: VillageTextureSet,
 ): VillageBuildResult {
   const ctx = createMapContext();
+  const templeBells: TempleBellInteractive[] = [];
   addGroundPlane(ctx, textures, 0xceb88d, 130);
 
   // Central dusty playground & chalk court
@@ -73,34 +75,239 @@ export function buildSchoolCampusMap(
     map: textures.wood,
     roughness: 0.84,
   });
+  const darkWoodMat = new THREE.MeshStandardMaterial({
+    map: textures.wood,
+    color: 0x6f4a2e,
+    roughness: 0.82,
+  });
   const blackboardMat = new THREE.MeshStandardMaterial({
     map: textures.blackboard,
     roughness: 0.9,
   });
+  const chalkStickMat = new THREE.MeshStandardMaterial({
+    color: 0xf9f7ef,
+    roughness: 0.92,
+  });
+  const dusterFeltMat = new THREE.MeshStandardMaterial({
+    color: 0x4b5358,
+    roughness: 0.95,
+  });
+  const paperMat = new THREE.MeshStandardMaterial({
+    color: 0xf4ecd8,
+    roughness: 0.88,
+  });
+  const chartMat = new THREE.MeshStandardMaterial({
+    color: 0xefe3bd,
+    roughness: 0.85,
+  });
+  const chartAccentMat = new THREE.MeshStandardMaterial({
+    color: 0xb94a2e,
+    roughness: 0.82,
+  });
+  const bookMats = [
+    new THREE.MeshStandardMaterial({ color: 0x2b5a84, roughness: 0.8 }),
+    new THREE.MeshStandardMaterial({ color: 0xa63c2c, roughness: 0.8 }),
+    new THREE.MeshStandardMaterial({ color: 0x3a6f47, roughness: 0.8 }),
+    new THREE.MeshStandardMaterial({ color: 0xc28a2e, roughness: 0.8 }),
+  ];
+  const bagMats = [
+    new THREE.MeshStandardMaterial({ color: 0x3b5978, roughness: 0.88 }), // Classic navy canvas basta
+    new THREE.MeshStandardMaterial({ color: 0x6c6b3d, roughness: 0.9 }), // Olive khaki school bag
+    new THREE.MeshStandardMaterial({ color: 0x8e3b32, roughness: 0.88 }), // Maroon cloth bag
+    new THREE.MeshStandardMaterial({ color: 0xb57d32, roughness: 0.88 }), // Ochre canvas satchel
+  ];
+  const strapMat = new THREE.MeshStandardMaterial({
+    color: 0xd9ccb0,
+    roughness: 0.92,
+  });
 
-  const addClassroomFurniture = (room: THREE.Group, doorSide: 'south' | 'east' | 'west') => {
-    // Blackboard opposite the doorway
-    const bb = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 1.4), blackboardMat);
-    if (doorSide === 'south') {
-      bb.position.set(0, 1.65, -2.55);
-    } else if (doorSide === 'east') {
-      bb.position.set(-2.55, 1.65, 0);
-      bb.rotation.y = Math.PI / 2;
-    } else {
-      bb.position.set(2.55, 1.65, 0);
-      bb.rotation.y = -Math.PI / 2;
+  // Helper: 1995 canvas school bag (basta) resting beside a desk or bench
+  const addSchoolBag = (
+    parent: THREE.Object3D,
+    x: number,
+    y: number,
+    z: number,
+    rotY: number,
+    matIdx: number,
+  ) => {
+    const bag = new THREE.Group();
+    bag.position.set(x, y, z);
+    bag.rotation.y = rotY;
+    const mat = bagMats[matIdx % bagMats.length];
+    // Main canvas body
+    addVisualBox(bag, 0, 0.16, 0, 0.34, 0.32, 0.14, mat);
+    // Overlapping stitched flap
+    addVisualBox(bag, 0, 0.25, 0.05, 0.35, 0.13, 0.06, strapMat);
+    // Shoulder strap loop resting on top/side
+    addVisualBox(bag, -0.11, 0.34, 0, 0.035, 0.06, 0.12, strapMat);
+    addVisualBox(bag, 0.11, 0.34, 0, 0.035, 0.06, 0.12, strapMat);
+    parent.add(bag);
+  };
+
+  // Helper: 1995 paired wooden school desk + bench with slates/notebooks & school bags
+  const addDeskAndBench = (
+    parent: THREE.Object3D,
+    bx: number,
+    deskZ: number,
+    bagSeed: number,
+  ) => {
+    // Sloped wooden desk (front of pair)
+    addVisualBox(parent, bx, 0.72, deskZ, 1.56, 0.06, 0.44, woodMat);
+    // Under-desk book shelf
+    addVisualBox(parent, bx, 0.56, deskZ, 1.44, 0.04, 0.36, darkWoodMat);
+    // Side legs for desk
+    addVisualBox(parent, bx - 0.68, 0.36, deskZ, 0.08, 0.72, 0.38, darkWoodMat);
+    addVisualBox(parent, bx + 0.68, 0.36, deskZ, 0.08, 0.72, 0.38, darkWoodMat);
+
+    // Open notebook & wooden slate on desktop
+    addVisualBox(parent, bx - 0.34, 0.76, deskZ + 0.02, 0.32, 0.02, 0.22, paperMat);
+    addVisualBox(
+      parent,
+      bx + 0.32,
+      0.76,
+      deskZ - 0.01,
+      0.28,
+      0.025,
+      0.22,
+      bookMats[bagSeed % bookMats.length],
+    );
+
+    // Matching wooden student bench behind the desk
+    const benchZ = deskZ + 0.52;
+    addVisualBox(parent, bx, 0.42, benchZ, 1.54, 0.06, 0.32, woodMat);
+    addVisualBox(parent, bx - 0.66, 0.21, benchZ, 0.08, 0.42, 0.28, darkWoodMat);
+    addVisualBox(parent, bx + 0.66, 0.21, benchZ, 0.08, 0.42, 0.28, darkWoodMat);
+
+    // School bag leaning beside the bench/desk
+    const sideOffset = bx < 0 ? -0.92 : 0.92;
+    addSchoolBag(parent, bx + sideOffset, 0, deskZ + 0.24, bx < 0 ? 0.3 : -0.35, bagSeed);
+  };
+
+  const addClassroomFurniture = (
+    room: THREE.Group,
+    doorSide: 'south' | 'east' | 'west',
+    roomId: string,
+  ) => {
+    const interior = new THREE.Group();
+    if (doorSide === 'east') {
+      interior.rotation.y = -Math.PI / 2;
+    } else if (doorSide === 'west') {
+      interior.rotation.y = Math.PI / 2;
     }
-    room.add(bb);
+    room.add(interior);
 
-    // Classic wooden school benches
-    for (const bx of [-1.45, 1.45]) {
-      addVisualBox(room, bx, 0.36, 0.25, 1.5, 0.08, 0.55, woodMat);
-      addVisualBox(room, bx - 0.62, 0.18, 0.25, 0.1, 0.36, 0.45, woodMat);
-      addVisualBox(room, bx + 0.62, 0.18, 0.25, 0.1, 0.36, 0.45, woodMat);
+    const wallBackZ = doorSide === 'south' ? -2.74 : -2.84;
+
+    if (roomId === 'cls-4') {
+      // Headmaster Office: Principal table, attendance registers, wooden almirah & notice board
+      addVisualBox(interior, 0, 1.72, wallBackZ, 2.2, 1.15, 0.08, darkWoodMat);
+      addVisualBox(interior, 0, 1.72, wallBackZ + 0.05, 2.04, 1.0, 0.02, chartMat);
+      addVisualBox(interior, -0.55, 1.85, wallBackZ + 0.065, 0.65, 0.42, 0.015, chartAccentMat);
+
+      // Principal's desk & green cloth top
+      addVisualBox(interior, 0, 0.76, -0.95, 2.1, 0.08, 0.95, darkWoodMat);
+      addVisualBox(interior, 0, 0.805, -0.95, 1.85, 0.015, 0.72, bookMats[2]);
+      addVisualBox(interior, -0.88, 0.38, -0.95, 0.22, 0.76, 0.85, woodMat);
+      addVisualBox(interior, 0.88, 0.38, -0.95, 0.22, 0.76, 0.85, woodMat);
+      // Stacked attendance registers & brass bell weight
+      addVisualBox(interior, -0.52, 0.84, -0.88, 0.36, 0.06, 0.26, bookMats[1]);
+      addVisualBox(interior, 0.48, 0.83, -1.0, 0.32, 0.04, 0.24, paperMat);
+      // Principal chair behind table
+      addVisualBox(interior, 0, 0.46, -1.78, 0.56, 0.06, 0.52, darkWoodMat);
+      addVisualBox(interior, 0, 0.86, -2.01, 0.56, 0.76, 0.06, darkWoodMat);
+      // Wooden file almirah on right wall
+      addVisualBox(interior, 2.85, 1.05, -1.45, 0.75, 2.1, 1.35, darkWoodMat);
+      // Visitor wooden benches
+      addVisualBox(interior, -1.75, 0.42, 1.05, 1.35, 0.07, 0.42, woodMat);
+      addVisualBox(interior, 1.75, 0.42, 1.05, 1.35, 0.07, 0.42, woodMat);
+      return;
+    }
+
+    // Classic 1995 Framed Slate Blackboard + Wooden Chalk Ledge + Chalk Sticks + Duster
+    addVisualBox(interior, 0, 1.66, wallBackZ, 3.55, 1.48, 0.07, darkWoodMat);
+    const bb = new THREE.Mesh(new THREE.PlaneGeometry(3.32, 1.28), blackboardMat);
+    bb.position.set(0, 1.66, wallBackZ + 0.045);
+    interior.add(bb);
+
+    // Protruding wooden chalk tray below blackboard
+    addVisualBox(interior, 0, 0.91, wallBackZ + 0.1, 3.38, 0.06, 0.16, woodMat);
+    // White chalk sticks resting on the chalk tray
+    for (let ci = 0; ci < 4; ci++) {
+      const chalk = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.014, 0.014, 0.11, 6),
+        chalkStickMat,
+      );
+      chalk.rotation.z = Math.PI / 2;
+      chalk.rotation.y = (ci - 1.5) * 0.18;
+      chalk.position.set(-0.9 + ci * 0.24, 0.955, wallBackZ + 0.12);
+      interior.add(chalk);
+    }
+    // Classic wooden-backed blackboard duster
+    addVisualBox(interior, 0.92, 0.97, wallBackZ + 0.11, 0.22, 0.04, 0.08, woodMat);
+    addVisualBox(interior, 0.92, 0.945, wallBackZ + 0.11, 0.22, 0.025, 0.08, dusterFeltMat);
+
+    // Wall educational poster / Hindi alphabet & India map chart next to blackboard
+    addVisualBox(interior, 2.48, 1.72, wallBackZ + 0.02, 1.02, 1.22, 0.03, chartMat);
+    addVisualBox(interior, 2.48, 2.34, wallBackZ + 0.035, 1.1, 0.05, 0.04, darkWoodMat);
+    addVisualBox(interior, 2.48, 1.1, wallBackZ + 0.035, 1.1, 0.05, 0.04, darkWoodMat);
+    addVisualBox(interior, 2.48, 1.82, wallBackZ + 0.04, 0.72, 0.56, 0.015, chartAccentMat);
+
+    // Teacher's wooden table & chair at front-left (keeping center clear for Teacher NPC!)
+    addVisualBox(interior, -2.25, 0.74, -1.65, 1.24, 0.06, 0.7, woodMat);
+    addVisualBox(interior, -2.78, 0.37, -1.65, 0.08, 0.74, 0.62, darkWoodMat);
+    addVisualBox(interior, -1.72, 0.37, -1.65, 0.08, 0.74, 0.62, darkWoodMat);
+    // Teacher's chalk box & attendance register on table
+    addVisualBox(interior, -2.52, 0.81, -1.55, 0.18, 0.09, 0.14, chartAccentMat);
+    addVisualBox(interior, -2.02, 0.79, -1.62, 0.34, 0.04, 0.26, bookMats[0]);
+    // Teacher's wooden chair
+    addVisualBox(interior, -2.25, 0.45, -2.28, 0.48, 0.05, 0.44, darkWoodMat);
+    addVisualBox(interior, -2.25, 0.78, -2.48, 0.48, 0.62, 0.05, darkWoodMat);
+
+    // 2 Rows of Paired Wooden School Desks + Benches (leaving a wide central aisle for gameplay!)
+    const rowCoords = doorSide === 'south' ? [-0.42, 1.02] : [-0.48, 0.92];
+    const colCoords = doorSide === 'south' ? [-2.12, 2.12] : [-1.85, 1.85];
+    let bagSeed = roomId.charCodeAt(roomId.length - 1);
+    for (const rz of rowCoords) {
+      for (const cx of colCoords) {
+        addDeskAndBench(interior, cx, rz, bagSeed++);
+      }
+    }
+
+    // Room-specific nostalgic props for Library & Science classrooms
+    if (roomId === 'cls-7') {
+      // Wooden library bookshelves stacked with colorful Hindi/English textbooks
+      for (const sz of [-1.2, 0.75]) {
+        addVisualBox(interior, 3.05, 1.05, sz, 0.45, 2.1, 1.45, darkWoodMat);
+        for (let sh = 0; sh < 4; sh++) {
+          addVisualBox(
+            interior,
+            2.96,
+            0.42 + sh * 0.44,
+            sz,
+            0.28,
+            0.26,
+            1.28,
+            bookMats[(sh + Math.round(sz + 2)) % bookMats.length],
+          );
+        }
+      }
+    } else if (roomId === 'cls-5') {
+      // Classroom globe & science apparatus on teacher's desk
+      const globeStand = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.06, 0.1, 0.12, 8),
+        darkWoodMat,
+      );
+      globeStand.position.set(-1.82, 0.83, -1.82);
+      const globe = new THREE.Mesh(
+        new THREE.SphereGeometry(0.14, 10, 8),
+        bookMats[0],
+      );
+      globe.position.set(-1.82, 1.01, -1.82);
+      interior.add(globeStand, globe);
     }
   };
 
-  // U-shaped Village School: 6 Enterable Classrooms & Staff/Library Rooms!
+  // U-shaped Village School: 7 Enterable Classrooms & Staff/Library Rooms!
   const classrooms: Array<{
     id: string;
     label: string;
@@ -137,16 +344,72 @@ export function buildSchoolCampusMap(
       trimColor: 0x26486c,
       textures,
       minimapKind: 'school',
-      addInteriorProps: (r) => addClassroomFurniture(r, c.door),
+      addInteriorProps: (r) => addClassroomFurniture(r, c.door, c.id),
     });
+
+    // Register interactive classroom wooden benches & Headmaster visitor benches
+    const roomRotY =
+      c.door === 'east' ? -Math.PI / 2 : c.door === 'west' ? Math.PI / 2 : 0;
+    const cosR = Math.cos(roomRotY);
+    const sinR = Math.sin(roomRotY);
+    const toWorld = (lx: number, lz: number) => ({
+      x: c.x + lx * cosR + lz * sinR,
+      z: c.z - lx * sinR + lz * cosR,
+    });
+    if (c.id === 'cls-4') {
+      // Visitor wooden benches inside Headmaster Office facing principal desk
+      for (const [bi, bx] of ([-1.75, 1.75] as const).entries()) {
+        const wp = toWorld(bx, 1.05);
+        ctx.seats.push({
+          id: `l2_${c.id}_bench_${bi}`,
+          x: wp.x,
+          z: wp.z,
+          seatY: 0.42,
+          rotY: roomRotY + Math.PI,
+          label: 'Wooden Bench',
+          kind: 'bench',
+        });
+      }
+    } else {
+      const rowCoords = c.door === 'south' ? [-0.42, 1.02] : [-0.48, 0.92];
+      const colCoords = c.door === 'south' ? [-2.12, 2.12] : [-1.85, 1.85];
+      let seatIdx = 0;
+      for (const rz of rowCoords) {
+        const benchZ = rz + 0.52;
+        for (const cx of colCoords) {
+          for (const side of [-0.36, 0.36]) {
+            const wp = toWorld(cx + side, benchZ);
+            ctx.seats.push({
+              id: `l2_${c.id}_bench_${seatIdx++}`,
+              x: wp.x,
+              z: wp.z,
+              seatY: 0.42,
+              rotY: roomRotY + Math.PI,
+              label: 'School Bench',
+              kind: 'bench',
+            });
+          }
+        }
+      }
+    }
+
+    // Prime interior classroom hiding spots behind desks/corner
+    if (c.door === 'south') {
+      ctx.hidingSpots.push({
+        x: c.x - 2.35,
+        z: c.z - 1.35,
+        label: `Inside ${c.label}`,
+        kind: 'house',
+      });
+    }
   }
 
-  // Iconic "PRATHMIK VIDYALAYA" School Signboard above the main veranda
+  // Iconic "PRATHMIK VIDYALAYA" School Signboard above the main veranda terrace
   const signMesh = new THREE.Mesh(
     new THREE.BoxGeometry(8.6, 1.5, 0.25),
     new THREE.MeshStandardMaterial({ map: textures.schoolSign, roughness: 0.6 }),
   );
-  signMesh.position.set(1.5, 4.35, -14.2);
+  signMesh.position.set(1.5, 4.95, -14.2);
   signMesh.castShadow = true;
   ctx.group.add(signMesh);
 
@@ -155,17 +418,118 @@ export function buildSchoolCampusMap(
     color: 0xf0e4c8,
     roughness: 0.85,
   });
+  const stairStoneMat = new THREE.MeshStandardMaterial({
+    map: textures.templeStone,
+    color: 0xd9c6a3,
+    roughness: 0.9,
+  });
+  const parapetTrimMat = new THREE.MeshStandardMaterial({
+    color: 0x26486c,
+    roughness: 0.82,
+  });
   const canopyMat = new THREE.MeshStandardMaterial({
     map: textures.roofTile,
     color: 0xb65235,
     roughness: 0.88,
   });
-  // North veranda overhang
-  const nCanopy = new THREE.Mesh(new THREE.BoxGeometry(39, 0.2, 3.2), canopyMat);
-  nCanopy.position.set(1.5, 3.3, -12.8);
-  nCanopy.castShadow = true;
-  ctx.group.add(nCanopy);
 
+  // North veranda slab — serves as BOTH ground corridor ceiling AND walkable upper school balcony!
+  const upperBalconySlab = new THREE.Mesh(
+    new THREE.BoxGeometry(42.4, 0.24, 3.25),
+    stairStoneMat,
+  );
+  upperBalconySlab.position.set(1.4, 3.33, -12.8);
+  upperBalconySlab.castShadow = true;
+  upperBalconySlab.receiveShadow = true;
+  ctx.group.add(upperBalconySlab);
+  // Walkable upper balcony collider (minY: 3.05 lets ground players pass freely underneath!)
+  ctx.boxes.push({
+    minX: -19.8,
+    maxX: 22.6,
+    minZ: -14.42,
+    maxZ: -11.18,
+    minY: 3.05,
+    topY: 3.45,
+    climbable: true,
+    blocksSight: false,
+  });
+
+  // Waist-high lime-washed parapet wall along the South edge of the upper corridor terrace
+  const southParapet = new THREE.Mesh(
+    new THREE.BoxGeometry(42.4, 0.82, 0.22),
+    pillarMat,
+  );
+  southParapet.position.set(1.4, 3.86, -11.24);
+  southParapet.castShadow = true;
+  southParapet.receiveShadow = true;
+  ctx.group.add(southParapet);
+  const southCoping = new THREE.Mesh(
+    new THREE.BoxGeometry(42.5, 0.08, 0.28),
+    parapetTrimMat,
+  );
+  southCoping.position.set(1.4, 4.3, -11.24);
+  ctx.group.add(southCoping);
+  // Parapet guardrail collider (active only upstairs via minY: 3.15!)
+  ctx.boxes.push({
+    minX: -19.8,
+    maxX: 22.6,
+    minZ: -11.38,
+    maxZ: -11.08,
+    minY: 3.15,
+    topY: 4.35,
+    climbable: false,
+    blocksSight: false,
+  });
+  // Back north edge guardrail along classrooms roof line so upstairs players stay cleanly on the corridor
+  const northBalconyCurb = new THREE.Mesh(
+    new THREE.BoxGeometry(37.6, 0.52, 0.22),
+    pillarMat,
+  );
+  northBalconyCurb.position.set(1.4, 3.71, -14.34);
+  ctx.group.add(northBalconyCurb);
+  ctx.boxes.push({
+    minX: -17.4,
+    maxX: 20.2,
+    minZ: -14.48,
+    maxZ: -14.22,
+    minY: 3.15,
+    topY: 4.2,
+    climbable: false,
+    blocksSight: false,
+  });
+
+  // Rooftop cement water tank & stacked spare wooden desks on the upper terrace (great hiding spots!)
+  const tankMat = new THREE.MeshStandardMaterial({ color: 0x9aa2a8, roughness: 0.85 });
+  const roofTank = new THREE.Mesh(new THREE.BoxGeometry(2.1, 1.35, 1.5), tankMat);
+  roofTank.position.set(-15.2, 4.12, -13.15);
+  roofTank.castShadow = true;
+  ctx.group.add(roofTank);
+  ctx.boxes.push({
+    minX: -16.25,
+    maxX: -14.15,
+    minZ: -13.9,
+    maxZ: -12.4,
+    minY: 3.2,
+    topY: 4.82,
+    climbable: false,
+    blocksSight: true,
+  });
+  const roofDesks = new THREE.Mesh(new THREE.BoxGeometry(2.2, 1.05, 1.25), woodMat);
+  roofDesks.position.set(14.8, 3.98, -13.25);
+  roofDesks.castShadow = true;
+  ctx.group.add(roofDesks);
+  ctx.boxes.push({
+    minX: 13.7,
+    maxX: 15.9,
+    minZ: -13.88,
+    maxZ: -12.62,
+    minY: 3.2,
+    topY: 4.55,
+    climbable: false,
+    blocksSight: true,
+  });
+
+  // Veranda pillars along North corridor
   for (let px = -16.5; px <= 19.5; px += 4.5) {
     addSolidBox(ctx, px, -11.4, 0.42, 3.3, 0.42, pillarMat, false);
     ctx.hidingSpots.push({
@@ -176,6 +540,178 @@ export function buildSchoolCampusMap(
     });
   }
 
+  // Twin Climbable Masonry Staircases (West & East ends of North Wing) leading to the Upper Veranda Corridor!
+  const buildSchoolStaircase = (
+    centerX: number,
+    sideSign: -1 | 1,
+    hideLabel: string,
+  ) => {
+    const stairWidth = 2.2;
+    const stepCount = 15;
+    const stepRise = 0.23; // <= 0.26m so players walk smoothly right up every step!
+    const stepRun = 0.36;
+    const startZ = -18.8; // Bottom entrance on the North-West / North-East courtyard flank
+    // Climbs southward from startZ (-18.8) -> top landing at z = -13.4 (flush with upper veranda slab!)
+
+    for (let i = 0; i < stepCount; i++) {
+      const topY = Number(((i + 1) * stepRise).toFixed(3));
+      const treadZ = startZ + i * stepRun + stepRun * 0.5;
+      const isUpperCantilever = i >= 8;
+      const meshHeight = isUpperCantilever ? 0.48 : topY;
+      const meshY = isUpperCantilever ? topY - meshHeight * 0.5 : topY * 0.5;
+
+      const stepMesh = new THREE.Mesh(
+        new THREE.BoxGeometry(stairWidth, meshHeight, stepRun + 0.04),
+        stairStoneMat,
+      );
+      stepMesh.position.set(centerX, meshY, treadZ);
+      stepMesh.castShadow = true;
+      stepMesh.receiveShadow = true;
+      ctx.group.add(stepMesh);
+
+      ctx.boxes.push({
+        minX: centerX - stairWidth * 0.5,
+        maxX: centerX + stairWidth * 0.5,
+        minZ: treadZ - stepRun * 0.5 - 0.03,
+        maxZ: treadZ + stepRun * 0.5 + 0.03,
+        minY: isUpperCantilever ? topY - 0.52 : undefined,
+        topY,
+        climbable: true,
+        blocksSight: !isUpperCantilever && topY > 1.15,
+      });
+    }
+
+    // Sloped outer stone balustrade railing along the exterior side of the staircase
+    const outerX = centerX + sideSign * (stairWidth * 0.5 + 0.09);
+    const railLen = stepCount * stepRun;
+    const midZ = startZ + railLen * 0.5;
+    const stairRail = new THREE.Mesh(
+      new THREE.BoxGeometry(0.18, 0.78, Math.hypot(railLen, 3.45)),
+      pillarMat,
+    );
+    stairRail.position.set(outerX, 2.08, midZ);
+    stairRail.rotation.x = -Math.atan2(3.45, railLen);
+    stairRail.castShadow = true;
+    ctx.group.add(stairRail);
+
+    // Side landing connection slab tying step 15 seamlessly into the upper veranda balcony
+    const landingZ = startZ + stepCount * stepRun + 0.8;
+    const landingMesh = new THREE.Mesh(
+      new THREE.BoxGeometry(stairWidth + 0.2, 0.24, 1.9),
+      stairStoneMat,
+    );
+    landingMesh.position.set(centerX, 3.33, landingZ);
+    landingMesh.castShadow = true;
+    landingMesh.receiveShadow = true;
+    ctx.group.add(landingMesh);
+    ctx.boxes.push({
+      minX: centerX - stairWidth * 0.5 - 0.1,
+      maxX: centerX + stairWidth * 0.5 + 0.1,
+      minZ: landingZ - 0.95,
+      maxZ: landingZ + 0.95,
+      minY: 3.05,
+      topY: 3.45,
+      climbable: true,
+      blocksSight: false,
+    });
+
+    // Under-staircase shadowed hiding alcove beneath the upper steps!
+    ctx.hidingSpots.push({
+      x: centerX,
+      z: startZ + 11.5 * stepRun,
+      label: hideLabel,
+      kind: 'gully',
+    });
+  };
+
+  buildSchoolStaircase(-18.75, -1, 'Under West School Staircase');
+  buildSchoolStaircase(21.45, 1, 'Under East School Staircase');
+
+  // Interactive Hanging Brass School Bell (Ghanti) under the North Veranda Corridor!
+  const bellX = 11.4;
+  const bellZ = -11.45;
+  const bellY = 3.16;
+  const brassMat = new THREE.MeshStandardMaterial({
+    color: 0xd9a63a,
+    metalness: 0.78,
+    roughness: 0.28,
+  });
+  // Timber mounting beam & hook
+  const bellBeam = new THREE.Mesh(new THREE.BoxGeometry(0.9, 0.14, 0.18), darkWoodMat);
+  bellBeam.position.set(bellX, bellY + 0.06, bellZ);
+  ctx.group.add(bellBeam);
+
+  const bellPivot = new THREE.Group();
+  bellPivot.position.set(bellX, bellY, bellZ);
+  ctx.group.add(bellPivot);
+
+  const bellChain = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.02, 0.02, 0.42, 7),
+    brassMat,
+  );
+  bellChain.position.y = -0.21;
+  bellPivot.add(bellChain);
+
+  const bellCrown = new THREE.Mesh(new THREE.SphereGeometry(0.095, 10, 8), brassMat);
+  bellCrown.position.y = -0.43;
+  bellPivot.add(bellCrown);
+
+  const bellBody = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.095, 0.23, 0.34, 14),
+    brassMat,
+  );
+  bellBody.position.y = -0.61;
+  bellBody.castShadow = true;
+  bellPivot.add(bellBody);
+
+  const bellLip = new THREE.Mesh(new THREE.TorusGeometry(0.222, 0.022, 8, 16), brassMat);
+  bellLip.rotation.x = Math.PI / 2;
+  bellLip.position.y = -0.78;
+  bellPivot.add(bellLip);
+
+  const clapperPivot = new THREE.Group();
+  clapperPivot.position.set(0, -0.54, 0);
+  bellPivot.add(clapperPivot);
+
+  const clapperStem = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.014, 0.014, 0.3, 6),
+    brassMat,
+  );
+  clapperStem.position.y = -0.15;
+  const clapperBall = new THREE.Mesh(new THREE.SphereGeometry(0.052, 8, 8), brassMat);
+  clapperBall.position.y = -0.3;
+  clapperPivot.add(clapperStem, clapperBall);
+
+  // Subtle expanding golden shimmer wave shown when player rings the school bell
+  const ringWave = new THREE.Mesh(
+    new THREE.RingGeometry(0.26, 0.4, 24),
+    new THREE.MeshBasicMaterial({
+      color: 0xffd76a,
+      transparent: true,
+      opacity: 0,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+    }),
+  );
+  ringWave.rotation.x = Math.PI / 2;
+  ringWave.position.set(bellX, 2.38, bellZ);
+  ringWave.visible = false;
+  ctx.group.add(ringWave);
+
+  templeBells.push({
+    pivot: bellPivot,
+    clapper: clapperPivot,
+    ringWave,
+    worldX: bellX,
+    worldY: 2.5,
+    worldZ: bellZ,
+    swingAngle: 0,
+    swingVel: 0,
+    swingDir: 1,
+    waveProgress: 1,
+    label: 'School Bell',
+  });
+
   // West wing veranda overhang
   const wCanopy = new THREE.Mesh(new THREE.BoxGeometry(2.8, 0.2, 19.5), canopyMat);
   wCanopy.position.set(-19.9, 3.3, 3.0);
@@ -185,7 +721,7 @@ export function buildSchoolCampusMap(
     addSolidBox(ctx, -18.7, pz, 0.42, 3.3, 0.42, pillarMat, false);
   }
 
-  // Assembly Stage & Tricolour Flagpole on North Edge of Playground
+  // Assembly Stage on North Edge of Playground
   const stageMat = new THREE.MeshStandardMaterial({
     map: textures.templeStone,
     color: 0xdec8a0,
@@ -203,30 +739,110 @@ export function buildSchoolCampusMap(
     kind: 'gully',
   });
 
-  // Tall school flagpole
+  // Upgraded School Flagpole with Stepped White Pedestal & Waving Indian Tricolour!
   const poleGroup = new THREE.Group();
   poleGroup.position.set(-9.5, 0, -6.8);
-  const poleBase = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.9, 1.1, 0.6, 8),
+  const pedestalStep1 = new THREE.Mesh(
+    new THREE.CylinderGeometry(1.18, 1.32, 0.28, 12),
     pillarMat,
   );
-  poleBase.position.y = 0.3;
-  poleGroup.add(poleBase);
+  pedestalStep1.position.y = 0.14;
+  pedestalStep1.castShadow = true;
+  pedestalStep1.receiveShadow = true;
+  const pedestalStep2 = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.84, 0.94, 0.28, 12),
+    stageMat,
+  );
+  pedestalStep2.position.y = 0.42;
+  pedestalStep2.castShadow = true;
+  const pedestalStep3 = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.46, 0.54, 0.24, 12),
+    pillarMat,
+  );
+  pedestalStep3.position.y = 0.68;
+  poleGroup.add(pedestalStep1, pedestalStep2, pedestalStep3);
+
   const pole = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.06, 0.08, 6.4, 8),
-    new THREE.MeshStandardMaterial({ color: 0xdfe4e8, metalness: 0.45, roughness: 0.4 }),
+    new THREE.CylinderGeometry(0.055, 0.075, 6.8, 10),
+    new THREE.MeshStandardMaterial({ color: 0xeaf0f4, metalness: 0.42, roughness: 0.35 }),
   );
-  pole.position.y = 3.5;
+  pole.position.y = 4.05;
+  pole.castShadow = true;
   poleGroup.add(pole);
-  // Decorative festive school pennant
-  const flag = new THREE.Mesh(
-    new THREE.BoxGeometry(1.4, 0.85, 0.05),
-    new THREE.MeshStandardMaterial({ color: 0xe67e22, roughness: 0.7 }),
+
+  const finial = new THREE.Mesh(new THREE.SphereGeometry(0.11, 10, 8), brassMat);
+  finial.position.y = 7.48;
+  poleGroup.add(finial);
+
+  // Halyard rope running along flagpole
+  const rope = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.01, 0.01, 6.3, 6),
+    strapMat,
   );
-  flag.position.set(0.72, 6.1, 0);
-  poleGroup.add(flag);
+  rope.position.set(0.09, 4.1, 0);
+  poleGroup.add(rope);
+
+  // Waving 3-band Indian Tricolour Flag (saffron, white + navy Ashoka Chakra, green)
+  const flagPivot = new THREE.Group();
+  flagPivot.position.set(0.05, 6.85, 0);
+  const saffronBand = new THREE.Mesh(
+    new THREE.BoxGeometry(1.56, 0.3, 0.04),
+    new THREE.MeshStandardMaterial({ color: 0xff8c24, roughness: 0.72 }),
+  );
+  saffronBand.position.set(0.78, 0.3, 0);
+  const whiteBand = new THREE.Mesh(
+    new THREE.BoxGeometry(1.56, 0.3, 0.04),
+    new THREE.MeshStandardMaterial({ color: 0xf9f9f6, roughness: 0.72 }),
+  );
+  whiteBand.position.set(0.78, 0, 0);
+  const greenBand = new THREE.Mesh(
+    new THREE.BoxGeometry(1.56, 0.3, 0.04),
+    new THREE.MeshStandardMaterial({ color: 0x1b8a3a, roughness: 0.72 }),
+  );
+  greenBand.position.set(0.78, -0.3, 0);
+  const chakraMat = new THREE.MeshStandardMaterial({ color: 0x14338a, roughness: 0.65 });
+  const chakraFront = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.11, 0.055, 16), chakraMat);
+  chakraFront.rotation.x = Math.PI / 2;
+  chakraFront.position.set(0.78, 0, 0);
+  flagPivot.add(saffronBand, whiteBand, greenBand, chakraFront);
+  poleGroup.add(flagPivot);
+  ctx.swayFoliage.push(flagPivot);
+
   ctx.group.add(poleGroup);
-  ctx.circles.push({ x: -9.5, z: -6.8, radius: 1.15, blocksSight: false });
+  ctx.circles.push({ x: -9.5, z: -6.8, radius: 1.32, blocksSight: false });
+
+  // Courtyard Cast-Iron Village Hand Pump & Clay Water Matkas (South-West Shade Area)
+  const schoolPump = buildHandPump(-11.4, 13.8, 0.35);
+  ctx.group.add(schoolPump.group);
+  ctx.circles.push(schoolPump.collider);
+  ctx.hidingSpots.push({
+    x: -12.8,
+    z: 14.5,
+    label: 'Behind School Hand Pump',
+    kind: 'pump',
+  });
+
+  // Drinking-water terracotta matkas on a brick stand beside the hand pump
+  const matkaStand = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.52, 0.62), stageMat);
+  matkaStand.position.set(-9.55, 0.26, 14.3);
+  matkaStand.castShadow = true;
+  ctx.group.add(matkaStand);
+  const matkaMat = new THREE.MeshStandardMaterial({ color: 0xa64e2e, roughness: 0.84 });
+  for (const mx of [-9.85, -9.25]) {
+    const pot = new THREE.Mesh(new THREE.SphereGeometry(0.24, 10, 8), matkaMat);
+    pot.position.set(mx, 0.72, 14.3);
+    pot.castShadow = true;
+    ctx.group.add(pot);
+  }
+  ctx.boxes.push({
+    minX: -10.25,
+    maxX: -8.85,
+    minZ: 13.95,
+    maxZ: 14.65,
+    blocksSight: false,
+    topY: 0.96,
+    climbable: true,
+  });
 
   // Playground Iron Swing Frame (SE of playground)
   const swingGroup = new THREE.Group();
@@ -241,6 +857,9 @@ export function buildSchoolCampusMap(
   addVisualBox(swingGroup, 0, 3.15, 0, 4.4, 0.14, 0.14, ironMat);
   for (const sx of [-0.9, 0.9]) {
     addVisualBox(swingGroup, sx, 0.8, 0, 0.75, 0.08, 0.32, woodMat);
+    // Swing chains
+    addVisualBox(swingGroup, sx - 0.32, 1.98, 0, 0.025, 2.34, 0.025, ironMat);
+    addVisualBox(swingGroup, sx + 0.32, 1.98, 0, 0.025, 2.34, 0.025, ironMat);
   }
   ctx.group.add(swingGroup);
   ctx.circles.push({ x: 9.4, z: 11.5, radius: 0.35, blocksSight: false });
@@ -278,7 +897,7 @@ export function buildSchoolCampusMap(
   ctx.hidingSpots.push({ x: 28.8, z: 13.5, label: 'Inside School Garden Hedge', kind: 'tree' });
   ctx.hidingSpots.push({ x: 23.0, z: 17.8, label: 'Behind Garden Flowerbed', kind: 'tree' });
 
-  // Drinking Water Shed & School Bell Post (South-West)
+  // Sports Equipment Shed (South-West)
   buildEnterableRoom(ctx, {
     id: 'cls-store',
     label: 'Sports Equipment Shed',
@@ -315,9 +934,9 @@ export function buildSchoolCampusMap(
     'Behind Headmaster’s Vintage Scooter',
   );
 
-  // Shade Neem & Gulmohar Trees around Campus
+  // Shade Neem & Gulmohar Trees around Campus & Courtyard
   const treeCoords: Array<[number, number, number, number]> = [
-    [-14.5, 15.0, 1.15, 0x457d36],
+    [-14.8, 15.2, 1.18, 0x457d36], // Shady Neem beside school hand pump!
     [-25.5, 19.5, 1.2, 0x3b7130],
     [15.5, 22.5, 1.15, 0x4d843a],
     [29.5, 4.2, 1.1, 0xd45a2a], // Gulmohar bloom tree!
@@ -326,14 +945,15 @@ export function buildSchoolCampusMap(
     [28.0, -14.5, 1.18, 0x467c37],
     [-1.5, -26.5, 1.22, 0x3d7031],
     [13.5, -26.5, 1.15, 0x4c833a],
+    [16.2, -5.8, 1.05, 0x488038], // Courtyard shade tree near East Wing
   ];
   for (const [tx, tz, sc, col] of treeCoords) {
     addTree(ctx, tx, tz, sc, textures, col, false, true, 'Behind a Campus Tree');
   }
 
   // Crates & School Desks stacked behind North Wing
-  addCrateStack(ctx, -20.5, -22.5, textures, 'Behind Stacked School Desks');
-  addCrateStack(ctx, 22.5, -23.0, textures, 'Behind Headmaster Shed Crates');
+  addCrateStack(ctx, -22.2, -23.2, textures, 'Behind Stacked School Desks');
+  addCrateStack(ctx, 24.0, -23.0, textures, 'Behind Headmaster Shed Crates');
 
   // Natural outer campus grove
   addNaturalPerimeter(ctx, textures, 44.5, 34, [0x3d6e31, 0x4c7f3a, 0x35622a], 'trees');
@@ -366,6 +986,8 @@ export function buildSchoolCampusMap(
     hidingSpots: ctx.hidingSpots,
     houseInteriors: ctx.houseInteriors,
     pondWater: null,
+    templeBells,
+    seats: ctx.seats,
     minimapLayout: {
       worldRadius: 42.5,
       groundTint: '#433726',
