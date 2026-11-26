@@ -20,8 +20,10 @@ import {
 } from './characters';
 import { setFaceTextureAnisotropy } from './characterFaces';
 import { buildLevelMap } from './levelBuilder';
+import { SkeletonVampireController } from './skeletonVampireNpc';
 import {
   getLevelConfig,
+  isLevelUnlocked,
   loadUnlockedLevel,
   saveUnlockedLevel,
   TOTAL_LEVELS,
@@ -306,6 +308,8 @@ export class ChhupanChhupaiEngine {
   private levelCache = new Map<number, VillageBuildResult>();
   private npcCache = new Map<number, VillageNpcSystem>();
   private activeNpcSystem: VillageNpcSystem | null = null;
+  private activeMapAnimate: ((elapsed: number, dt: number) => void) | null = null;
+  private skeletonVampire: SkeletonVampireController | null = null;
   private templeBells: TempleBellInteractive[] = [];
   private mapSeats: SeatSpot[] = [];
   private currentLevelId = 1;
@@ -761,9 +765,14 @@ export class ChhupanChhupaiEngine {
       this.scene.remove(this.activeNpcSystem.group);
       this.activeNpcSystem = null;
     }
+    if (this.skeletonVampire) {
+      this.scene.remove(this.skeletonVampire.group);
+      this.skeletonVampire.reset();
+    }
     this.templeBells = [];
     this.templeBellCooldown = 0;
     this.npcSlapCooldown = 0;
+    this.activeMapAnimate = null;
     if (!this.worldGroup) return;
     this.updateHouseRoofVisibility(null);
     this.scene.remove(this.worldGroup);
@@ -803,6 +812,7 @@ export class ChhupanChhupaiEngine {
     this.pondWater = built.pondWater;
     this.templeBells = built.templeBells ?? [];
     this.mapSeats = built.seats ?? [];
+    this.activeMapAnimate = built.animate ?? null;
     this.activeMinimapLayout = built.minimapLayout;
     this.activeSpawnPoints = built.spawnPoints ?? null;
 
@@ -823,6 +833,18 @@ export class ChhupanChhupaiEngine {
     }
     this.activeNpcSystem = npcSys;
     this.scene.add(npcSys.group);
+
+    // Bhutiya Haveli (Level 6) exclusive atmospheric Skeleton Vampire apparition
+    if (levelId === 6) {
+      if (!this.skeletonVampire) {
+        this.skeletonVampire = new SkeletonVampireController({
+          onAppear: (dist) => this.audio.playVampireAppearSound(dist),
+          onDisappear: (dist) => this.audio.playVampireDisappearSound(dist),
+        });
+      }
+      this.skeletonVampire.reset();
+      this.scene.add(this.skeletonVampire.group);
+    }
 
     // Collect solid walls, buildings, trunks & large props for 3D camera wall avoidance
     built.group.updateMatrixWorld(true);
@@ -858,7 +880,7 @@ export class ChhupanChhupaiEngine {
 
   public selectLevel(levelId: number): boolean {
     if (levelId < 1 || levelId > TOTAL_LEVELS) return false;
-    if (levelId > this.unlockedLevel) return false;
+    if (!isLevelUnlocked(levelId, this.unlockedLevel)) return false;
     this.audio.unlock();
     if (levelId === this.currentLevelId) return true;
 
@@ -881,7 +903,7 @@ export class ChhupanChhupaiEngine {
 
   public advanceToNextLevel(): void {
     const nextId = Math.min(TOTAL_LEVELS, this.currentLevelId + 1);
-    if (nextId > this.unlockedLevel) return;
+    if (!isLevelUnlocked(nextId, this.unlockedLevel)) return;
     this.newlyUnlockedLevel = null;
     this.loadLevelWorld(nextId);
     this.startMatch(this.selectedRole, this.currentCustomization);
@@ -1975,7 +1997,7 @@ export class ChhupanChhupaiEngine {
     this.onlineMode = false;
     this.onlineLocalPlayerId = null;
     this.currentOnlineRound = 0;
-    if (this.currentLevelId > this.unlockedLevel) {
+    if (!isLevelUnlocked(this.currentLevelId, this.unlockedLevel)) {
       this.loadLevelWorld(this.unlockedLevel);
     }
     this.returnToStart();
@@ -3461,9 +3483,9 @@ export class ChhupanChhupaiEngine {
       if (
         box.climbable &&
         box.topY !== undefined &&
-        pos.y >= box.topY - 0.26
+        pos.y >= box.topY - 0.28
       ) {
-        const tol = radius * 0.55;
+        const tol = radius * 0.58;
         if (
           pos.x > box.minX - tol &&
           pos.x < box.maxX + tol &&
@@ -3504,8 +3526,8 @@ export class ChhupanChhupaiEngine {
     for (const c of this.colliders.circles) {
       const dx = pos.x - c.x;
       const dz = pos.z - c.z;
-      if (c.climbable && c.topY !== undefined && pos.y >= c.topY - 0.26) {
-        const climbR = c.radius + radius * 0.55;
+      if (c.climbable && c.topY !== undefined && pos.y >= c.topY - 0.28) {
+        const climbR = c.radius + radius * 0.58;
         if (dx * dx + dz * dz < climbR * climbR) {
           supportY = Math.max(supportY, c.topY);
         }
@@ -3519,6 +3541,34 @@ export class ChhupanChhupaiEngine {
         const overlap = minDist - d;
         pos.x += (dx / d) * overlap;
         pos.z += (dz / d) * overlap;
+      }
+    }
+
+    // Dynamic 3D oriented-capsule collisions against village cows & buffaloes on all maps
+    if (this.activeNpcSystem?.resolveLargeAnimalCollisions(pos, radius)) {
+      // Safety re-clamp against solid world boxes & perimeter so animals never push a player into a wall
+      for (const box of this.colliders.boxes) {
+        if (box.minY !== undefined && pos.y + 1.5 < box.minY) continue;
+        if (box.topY !== undefined && pos.y >= box.topY - (box.climbable ? 0.28 : 0.08)) {
+          continue;
+        }
+        const closestX = THREE.MathUtils.clamp(pos.x, box.minX, box.maxX);
+        const closestZ = THREE.MathUtils.clamp(pos.z, box.minZ, box.maxZ);
+        const dx = pos.x - closestX;
+        const dz = pos.z - closestZ;
+        const dSq = dx * dx + dz * dz;
+        if (dSq < radius * radius && dSq > 1e-6) {
+          const d = Math.sqrt(dSq);
+          const overlap = radius - d;
+          pos.x += (dx / d) * overlap;
+          pos.z += (dz / d) * overlap;
+        }
+      }
+      const postDistSq = pos.x * pos.x + pos.z * pos.z;
+      if (postDistSq > maxR * maxR) {
+        const postDist = Math.sqrt(postDistSq);
+        pos.x = (pos.x / postDist) * maxR;
+        pos.z = (pos.z / postDist) * maxR;
       }
     }
 
@@ -3571,8 +3621,20 @@ export class ChhupanChhupaiEngine {
     return true;
   }
 
-  private isPositionBlocked(x: number, z: number, pad: number): boolean {
+  private isPositionBlocked(
+    x: number,
+    z: number,
+    pad: number,
+    currentY = 0,
+  ): boolean {
     for (const box of this.colliders.boxes) {
+      if (box.minY !== undefined && currentY + 1.5 < box.minY) continue;
+      if (box.climbable && box.topY !== undefined && currentY >= box.topY - 0.28) {
+        continue;
+      }
+      if (!box.climbable && box.topY !== undefined && currentY >= box.topY - 0.08) {
+        continue;
+      }
       if (
         x > box.minX - pad &&
         x < box.maxX + pad &&
@@ -3583,6 +3645,9 @@ export class ChhupanChhupaiEngine {
       }
     }
     for (const c of this.colliders.circles) {
+      if (c.climbable && c.topY !== undefined && currentY >= c.topY - 0.28) {
+        continue;
+      }
       const dx = x - c.x;
       const dz = z - c.z;
       const r = c.radius + pad;
@@ -3615,10 +3680,10 @@ export class ChhupanChhupaiEngine {
       const testAngle = baseAngle + offset;
       _probePos.set(
         pos.x + Math.sin(testAngle) * probeDist,
-        0,
+        pos.y,
         pos.z + Math.cos(testAngle) * probeDist,
       );
-      if (!this.isPositionBlocked(_probePos.x, _probePos.z, CHAR_RADIUS)) {
+      if (!this.isPositionBlocked(_probePos.x, _probePos.z, CHAR_RADIUS, pos.y)) {
         chosenAngle = testAngle;
         break;
       }
@@ -3628,7 +3693,13 @@ export class ChhupanChhupaiEngine {
     const dirZ = Math.cos(chosenAngle);
     pos.x += dirX * speed * dt;
     pos.z += dirZ * speed * dt;
-    this.resolveCollisions(pos, CHAR_RADIUS);
+    const supportY = this.resolveCollisions(pos, CHAR_RADIUS);
+    if (Math.abs(supportY - pos.y) <= 0.34) {
+      pos.y = THREE.MathUtils.damp(pos.y, supportY, 22, dt);
+      if (Math.abs(supportY - pos.y) < 0.012) pos.y = supportY;
+    } else if (pos.y > supportY) {
+      pos.y = Math.max(supportY, pos.y - 4.5 * dt);
+    }
 
     const currentYaw = rig.root.rotation.y;
     let diff = chosenAngle - currentYaw;
@@ -3916,9 +3987,13 @@ export class ChhupanChhupaiEngine {
     if (actor.grounded && supportY > pos.y && supportY <= pos.y + 0.28) {
       pos.y = THREE.MathUtils.damp(pos.y, supportY, 24, dt);
       if (supportY - pos.y < 0.012) pos.y = supportY;
+    } else if (actor.grounded && pos.y > supportY && pos.y - supportY <= 0.28) {
+      // Smooth grounded step-down when walking down temple steps or staircases
+      pos.y = THREE.MathUtils.damp(pos.y, supportY, 24, dt);
+      if (pos.y - supportY < 0.012) pos.y = supportY;
     }
 
-    if (actor.grounded && pos.y > supportY + 0.05) {
+    if (actor.grounded && pos.y > supportY + 0.28) {
       actor.grounded = false;
       actor.vy = 0;
     }
@@ -4021,11 +4096,12 @@ export class ChhupanChhupaiEngine {
         }
         this.resolveCollisions(pos, CHAR_RADIUS);
       }
-      if (!hider.grounded || pos.y > 0) {
+      const hiderSupportY = this.resolveCollisions(pos, CHAR_RADIUS);
+      if (!hider.grounded || pos.y > hiderSupportY + 0.02) {
         hider.vy -= GRAVITY * dt;
         pos.y += hider.vy * dt;
-        if (pos.y <= 0) {
-          pos.y = 0;
+        if (pos.y <= hiderSupportY) {
+          pos.y = hiderSupportY;
           hider.vy = 0;
           hider.grounded = true;
         }
@@ -4763,6 +4839,14 @@ export class ChhupanChhupaiEngine {
           ? this.playerActor.rig.root.position
           : null;
       this.activeNpcSystem.update(dt, this.camera.position, activePlayerPos);
+    }
+
+    if (this.currentLevelId === 6 && this.skeletonVampire) {
+      this.skeletonVampire.update(dt, this.camera.position);
+    }
+
+    if (this.activeMapAnimate) {
+      this.activeMapAnimate(this.elapsed, dt);
     }
   }
 
@@ -5631,6 +5715,11 @@ export class ChhupanChhupaiEngine {
     }
     this.npcCache.clear();
     this.activeNpcSystem = null;
+    if (this.skeletonVampire) {
+      this.scene.remove(this.skeletonVampire.group);
+      this.skeletonVampire.dispose();
+      this.skeletonVampire = null;
+    }
 
     for (const cached of this.levelCache.values()) {
       collectDisposable(cached.group);

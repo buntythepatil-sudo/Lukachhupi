@@ -1433,15 +1433,6 @@ export default function App() {
     engineRef.current?.startMatch(chosenRole, customization);
   };
 
-  const handleExploreSchool = () => {
-    activeSoloSessionIdRef.current = null;
-    setShowScoreboard(false);
-    setShowCameraSettings(false);
-    setShowAudioSettings(false);
-    setStartScreen('menu');
-    engineRef.current?.startExploreSchool(customization);
-  };
-
   const handleExitExplore = () => {
     activeSoloSessionIdRef.current = null;
     setShowScoreboard(false);
@@ -3354,16 +3345,6 @@ export default function App() {
                     </span>
                   </button>
 
-                  {/* Explore 1995 Village School Free-Roam Button */}
-                  <button
-                    type="button"
-                    onClick={handleExploreSchool}
-                    className="mt-1.5 w-full inline-flex items-center justify-center gap-1.5 min-h-[38px] sm:min-h-[42px] rounded-xl border border-amber-300/40 bg-[#2b1f14]/95 hover:bg-[#3a2a1b] active:scale-[0.985] px-3 py-1.5 text-xs sm:text-sm font-bold tracking-wide text-amber-200 transition-colors whitespace-nowrap cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
-                  >
-                    <Compass className="w-4 h-4 text-amber-300 shrink-0" aria-hidden="true" />
-                    <span>EXPLORE 1995 VILLAGE SCHOOL</span>
-                  </button>
-
                   {/* 2x2 Menu Navigation Grid: MULTIPLAYER, LEVELS, CHARACTER, FRIENDS */}
                   <div className="mt-2 grid grid-cols-2 gap-1.5 sm:gap-2">
                     <button
@@ -3669,7 +3650,7 @@ export default function App() {
                     })}
                   </div>
 
-                  {/* Compact Selected Map Brief + Free Explore Village School */}
+                  {/* Compact Selected Map Brief */}
                   <div className="mt-2 rounded-lg bg-[#150e0a]/85 border border-amber-100/12 px-2.5 py-1.5 text-[10px] sm:text-[11px] text-amber-100/80 leading-snug">
                     <div className="line-clamp-2">
                       <span className="font-semibold text-amber-200">
@@ -3677,14 +3658,6 @@ export default function App() {
                       </span>{' '}
                       {activeLevel.description}
                     </div>
-                    <button
-                      type="button"
-                      onClick={handleExploreSchool}
-                      className="mt-1.5 w-full inline-flex items-center justify-center gap-1.5 min-h-[32px] rounded-lg border border-amber-300/35 bg-[#2a1d13] hover:bg-[#3a2819] px-2.5 py-1 text-[10.5px] sm:text-xs font-bold text-amber-200 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
-                    >
-                      <Compass className="w-3.5 h-3.5 text-amber-300 shrink-0" aria-hidden="true" />
-                      <span>Explore 1995 Village School (Free Roam)</span>
-                    </button>
                   </div>
 
                   {/* Start Screen Quick Audio Sliders */}

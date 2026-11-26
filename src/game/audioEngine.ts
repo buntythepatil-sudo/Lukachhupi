@@ -143,10 +143,20 @@ export class VillageAudioEngine {
       this.haveliWindTimer = 1.6 + Math.random() * 2.4;
       this.haveliDoorCreakTimer = 6.5 + Math.random() * 6.0;
       this.haveliFloorCreakTimer = 5.0 + Math.random() * 6.0;
-    } else if (levelId === 7) {
+    } else if (levelId === 7 || levelId === 11 || levelId === 12 || levelId === 13) {
       this.riverFlowTimer = 1.2 + Math.random() * 1.6;
       this.orchardWindTimer = 3.4 + Math.random() * 3.2;
       this.birdTimer = 1.6 + Math.random() * 2.2;
+    } else if (levelId === 9) {
+      this.trainWhistleTimer = 5.5 + Math.random() * 5.0;
+      this.orchardWindTimer = 2.6 + Math.random() * 2.8;
+      this.birdTimer = 1.8 + Math.random() * 2.2;
+    } else if (levelId === 10 || levelId === 14) {
+      this.marketChatterTimer = 1.8 + Math.random() * 2.2;
+      this.marketClinkTimer = 3.0 + Math.random() * 3.4;
+    } else if (levelId === 15) {
+      this.orchardWindTimer = 2.0 + Math.random() * 2.4;
+      this.birdTimer = 3.2 + Math.random() * 3.5;
     }
   }
 
@@ -894,6 +904,15 @@ export class VillageAudioEngine {
       const d = Math.hypot(lx - MARKET_POS.x, lz - MARKET_POS.z);
       const gain = 0.12 * proximityGain(d, 12, 50);
       this.playVillageAnnouncement(gain);
+    }
+
+    // Gentle warm afternoon breeze rustling through the banyan tree & village fields on Level 1
+    if (this.activeLevelId === 1) {
+      this.orchardWindTimer -= dt;
+      if (this.orchardWindTimer <= 0) {
+        this.orchardWindTimer = 8.0 + Math.random() * 7.5;
+        this.playOrchardWindRustle(0.075 + Math.random() * 0.04);
+      }
     }
 
     // Nostalgic 1995 Village School Soundscape when on Level 2 (School Campus)
@@ -1979,6 +1998,170 @@ export class VillageAudioEngine {
     env.connect(out);
     osc.start(now);
     osc.stop(now + dur + 0.04);
+  }
+
+  /**
+   * Spooky Skeleton Vampire apparition sound for Bhutiya Haveli (Level 6):
+   * chilling spectral draft, hollow gothic resonance, and eerie echoing vampire laugh.
+   */
+  public playVampireAppearSound(distanceToCamera: number): void {
+    if (
+      !this.unlocked ||
+      !this.ctx ||
+      !this.ambienceGain ||
+      this.settings.muted ||
+      this.activeLevelId !== 6
+    ) {
+      return;
+    }
+
+    const now = this.ctx.currentTime;
+    const prox = Math.max(0.28, proximityGain(distanceToCamera, 9, 52));
+    const baseVol = 0.22 * prox;
+
+    // 1. Cold spectral mist whoosh as the vampire materializes
+    if (this.pinkNoise) {
+      const noise = this.ctx.createBufferSource();
+      noise.buffer = this.pinkNoise;
+      noise.loop = true;
+
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(220, now);
+      bp.frequency.exponentialRampToValueAtTime(920, now + 0.75);
+      bp.frequency.exponentialRampToValueAtTime(280, now + 2.1);
+      bp.Q.value = 2.6;
+
+      const nEnv = this.ctx.createGain();
+      nEnv.gain.setValueAtTime(0.0001, now);
+      nEnv.gain.linearRampToValueAtTime(baseVol * 0.75, now + 0.45);
+      nEnv.gain.exponentialRampToValueAtTime(0.0001, now + 2.2);
+
+      noise.connect(bp);
+      bp.connect(nEnv);
+      nEnv.connect(this.ambienceGain);
+      if (this.delayNode) nEnv.connect(this.delayNode);
+      noise.start(now, Math.random() * 1.2, 2.3);
+      noise.stop(now + 2.35);
+    }
+
+    // 2. Haunting gothic minor-second bowed chord swell (low eerie tension)
+    for (const freq of [110, 116.54, 220]) {
+      const drone = this.ctx.createOscillator();
+      drone.type = 'triangle';
+      drone.frequency.setValueAtTime(freq, now);
+      drone.frequency.linearRampToValueAtTime(freq * 0.96, now + 2.2);
+
+      const lp = this.ctx.createBiquadFilter();
+      lp.type = 'lowpass';
+      lp.frequency.value = 540;
+
+      const dEnv = this.ctx.createGain();
+      dEnv.gain.setValueAtTime(0.0001, now);
+      dEnv.gain.linearRampToValueAtTime(baseVol * 0.24, now + 0.55);
+      dEnv.gain.exponentialRampToValueAtTime(0.0001, now + 2.3);
+
+      drone.connect(lp);
+      lp.connect(dEnv);
+      dEnv.connect(this.ambienceGain);
+      drone.start(now);
+      drone.stop(now + 2.35);
+    }
+
+    // 3. Creepy hollow echoing skeleton vampire laugh ("Haa-ha-ha-ha-haa...")
+    const laughSyllables = [
+      { offset: 0.32, pitch: 238, dur: 0.28, amp: 0.85 },
+      { offset: 0.64, pitch: 218, dur: 0.24, amp: 1.0 },
+      { offset: 0.92, pitch: 196, dur: 0.22, amp: 0.95 },
+      { offset: 1.18, pitch: 174, dur: 0.24, amp: 0.85 },
+      { offset: 1.46, pitch: 148, dur: 0.42, amp: 0.72 },
+    ];
+
+    for (const syl of laughSyllables) {
+      const t0 = now + syl.offset;
+      const osc = this.ctx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(syl.pitch * 1.06, t0);
+      osc.frequency.exponentialRampToValueAtTime(syl.pitch * 0.84, t0 + syl.dur);
+
+      // Sinister skeletal vocal tremble (LFO vibrato)
+      const vib = this.ctx.createOscillator();
+      vib.type = 'sine';
+      vib.frequency.value = 11.5;
+      const vibGain = this.ctx.createGain();
+      vibGain.gain.value = 9.5;
+      vib.connect(vibGain);
+      vibGain.connect(osc.frequency);
+
+      // Dual formant bandpass filters for hollow raspy vampire voice timbre
+      const f1 = this.ctx.createBiquadFilter();
+      f1.type = 'bandpass';
+      f1.frequency.value = 560;
+      f1.Q.value = 4.6;
+
+      const f2 = this.ctx.createBiquadFilter();
+      f2.type = 'bandpass';
+      f2.frequency.value = 1380;
+      f2.Q.value = 5.2;
+
+      const env = this.ctx.createGain();
+      env.gain.setValueAtTime(0.0001, t0);
+      env.gain.linearRampToValueAtTime(baseVol * 0.65 * syl.amp, t0 + 0.045);
+      env.gain.exponentialRampToValueAtTime(0.0001, t0 + syl.dur);
+
+      osc.connect(f1);
+      osc.connect(f2);
+      f1.connect(env);
+      f2.connect(env);
+      env.connect(this.ambienceGain);
+      if (this.delayNode) env.connect(this.delayNode);
+
+      osc.start(t0);
+      vib.start(t0);
+      osc.stop(t0 + syl.dur + 0.05);
+      vib.stop(t0 + syl.dur + 0.05);
+    }
+  }
+
+  /** Mysterious smoky fade-out whoosh when the Skeleton Vampire disappears in Bhutiya Haveli */
+  public playVampireDisappearSound(distanceToCamera: number): void {
+    if (
+      !this.unlocked ||
+      !this.ctx ||
+      !this.ambienceGain ||
+      !this.pinkNoise ||
+      this.settings.muted ||
+      this.activeLevelId !== 6
+    ) {
+      return;
+    }
+
+    const now = this.ctx.currentTime;
+    const prox = Math.max(0.24, proximityGain(distanceToCamera, 9, 52));
+    const vol = 0.16 * prox;
+
+    const src = this.ctx.createBufferSource();
+    src.buffer = this.pinkNoise;
+    src.loop = true;
+
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(1180, now);
+    bp.frequency.exponentialRampToValueAtTime(240, now + 1.35);
+    bp.Q.value = 3.4;
+
+    const env = this.ctx.createGain();
+    env.gain.setValueAtTime(0.0001, now);
+    env.gain.linearRampToValueAtTime(vol, now + 0.25);
+    env.gain.exponentialRampToValueAtTime(0.0001, now + 1.45);
+
+    src.connect(bp);
+    bp.connect(env);
+    env.connect(this.ambienceGain);
+    if (this.delayNode) env.connect(this.delayNode);
+
+    src.start(now, Math.random() * 1.4, 1.5);
+    src.stop(now + 1.55);
   }
 
   // ---------------------------------------------------------------------------

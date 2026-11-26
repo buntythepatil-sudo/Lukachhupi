@@ -64,6 +64,173 @@ export interface CharacterBuildConfig {
   includeTagRing: boolean;
 }
 
+// ============================================================================
+// Cached Procedural 1990s Indian Fabric, Skin Pore & Hair Strand PBR Textures
+// Shared across all player rigs for silky Android GPU performance
+// ============================================================================
+const fabricTexCache = new Map<string, THREE.CanvasTexture>();
+let cachedSkinBumpTex: THREE.CanvasTexture | null = null;
+let cachedHairStrandTex: THREE.CanvasTexture | null = null;
+
+function getSkinBumpTexture(): THREE.CanvasTexture {
+  if (cachedSkinBumpTex) return cachedSkinBumpTex;
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#808080';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let i = 0; i < 650; i++) {
+    const px = (i * 53) % 128;
+    const py = (i * 97) % 128;
+    const v = 114 + ((i * 29) % 28);
+    ctx.fillStyle = `rgb(${v},${v},${v})`;
+    ctx.fillRect(px, py, 2, 2);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(3, 3);
+  tex.needsUpdate = true;
+  cachedSkinBumpTex = tex;
+  return tex;
+}
+
+function getHairStrandTexture(): THREE.CanvasTexture {
+  if (cachedHairStrandTex) return cachedHairStrandTex;
+  const canvas = document.createElement('canvas');
+  canvas.width = 128;
+  canvas.height = 128;
+  const ctx = canvas.getContext('2d')!;
+  ctx.fillStyle = '#808080';
+  ctx.fillRect(0, 0, 128, 128);
+  for (let x = 0; x < 128; x += 2) {
+    const shade = 104 + Math.round(Math.sin(x * 0.7) * 24 + ((x * 19) % 18));
+    ctx.fillStyle = `rgb(${shade},${shade},${shade})`;
+    ctx.fillRect(x, 0, 1, 128);
+  }
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(4, 2);
+  tex.needsUpdate = true;
+  cachedHairStrandTex = tex;
+  return tex;
+}
+
+function getFabricTexture(
+  kind: 'cotton_weave' | 'kurta_khadi' | 'frock_print' | 'twill',
+  baseHex: number,
+): THREE.CanvasTexture {
+  const key = `${kind}_${baseHex.toString(16)}`;
+  const hit = fabricTexCache.get(key);
+  if (hit) return hit;
+
+  const W = 256;
+  const H = 256;
+  const canvas = document.createElement('canvas');
+  canvas.width = W;
+  canvas.height = H;
+  const ctx = canvas.getContext('2d')!;
+
+  const base = new THREE.Color(baseHex);
+  const light = base.clone().lerp(new THREE.Color(0xffffff), 0.18);
+  const dark = base.clone().lerp(new THREE.Color(0x1a1410), 0.22);
+  const accent = base.clone().offsetHSL(0.08, 0.14, 0.22);
+
+  ctx.fillStyle = `#${base.getHexString()}`;
+  ctx.fillRect(0, 0, W, H);
+
+  // Fine woven cotton warp & weft threads (authentic 1990s handloom/mill cloth)
+  for (let y = 0; y < H; y += 4) {
+    ctx.fillStyle =
+      y % 8 === 0
+        ? `rgba(255,250,240,0.065)`
+        : `rgba(20,14,10,0.055)`;
+    ctx.fillRect(0, y, W, 1);
+  }
+  for (let x = 0; x < W; x += 4) {
+    ctx.fillStyle =
+      x % 8 === 0
+        ? `rgba(255,250,240,0.05)`
+        : `rgba(20,14,10,0.045)`;
+    ctx.fillRect(x, 0, 1, H);
+  }
+
+  if (kind === 'cotton_weave') {
+    // Classic 1990s Indian village checkered cotton shirt pattern
+    ctx.fillStyle = `#${dark.getHexString()}`;
+    ctx.globalAlpha = 0.16;
+    for (let i = 0; i < W; i += 32) {
+      ctx.fillRect(i, 0, 4, H);
+      ctx.fillRect(0, i, W, 4);
+    }
+    ctx.fillStyle = `#${light.getHexString()}`;
+    ctx.globalAlpha = 0.14;
+    for (let i = 16; i < W; i += 32) {
+      ctx.fillRect(i, 0, 2, H);
+      ctx.fillRect(0, i, W, 2);
+    }
+    ctx.globalAlpha = 1;
+  } else if (kind === 'kurta_khadi') {
+    // Organic hand-spun khadi slub texture & delicate woven vertical stripes
+    ctx.globalAlpha = 0.14;
+    ctx.fillStyle = `#${light.getHexString()}`;
+    for (let x = 0; x < W; x += 24) {
+      ctx.fillRect(x, 0, 2, H);
+      ctx.fillRect(x + 5, 0, 1, H);
+    }
+    ctx.fillStyle = `#${dark.getHexString()}`;
+    for (let i = 0; i < 160; i++) {
+      const sx = (i * 47) % W;
+      const sy = (i * 83) % H;
+      ctx.fillRect(sx, sy, 10 + (i % 14), 1);
+    }
+    ctx.globalAlpha = 1;
+  } else if (kind === 'frock_print') {
+    // Nostalgic 1990s Indian block-printed cotton floral motifs
+    for (let gy = 16; gy < H; gy += 32) {
+      for (let gx = 16; gx < W; gx += 32) {
+        const ox = gx + ((gy / 32) % 2 === 0 ? 0 : 14);
+        ctx.fillStyle = `#${light.getHexString()}`;
+        ctx.globalAlpha = 0.34;
+        for (let p = 0; p < 5; p++) {
+          const a = (p / 5) * Math.PI * 2;
+          ctx.beginPath();
+          ctx.arc(ox + Math.cos(a) * 4.5, gy + Math.sin(a) * 4.5, 2.3, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        ctx.fillStyle = `#${accent.getHexString()}`;
+        ctx.globalAlpha = 0.45;
+        ctx.beginPath();
+        ctx.arc(ox, gy, 2.1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+  } else {
+    // Crisp school-uniform cotton twill diagonal weave
+    ctx.strokeStyle = 'rgba(20, 20, 24, 0.05)';
+    ctx.lineWidth = 1;
+    for (let i = -H; i < W + H; i += 6) {
+      ctx.beginPath();
+      ctx.moveTo(i, 0);
+      ctx.lineTo(i + H, H);
+      ctx.stroke();
+    }
+  }
+
+  const tex = new THREE.CanvasTexture(canvas);
+  tex.colorSpace = THREE.SRGBColorSpace;
+  tex.wrapS = THREE.RepeatWrapping;
+  tex.wrapT = THREE.RepeatWrapping;
+  tex.repeat.set(2, 2);
+  tex.anisotropy = 4;
+  tex.needsUpdate = true;
+  fabricTexCache.set(key, tex);
+  return tex;
+}
+
 function addHairGeometry(
   head: THREE.Group,
   hairStyle: HairStyle,
@@ -73,7 +240,7 @@ function addHairGeometry(
   // Base scalp cap shared across most hairstyles
   if (hairStyle === 'buzz') {
     const buzz = new THREE.Mesh(
-      new THREE.SphereGeometry(0.198, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.54),
+      new THREE.SphereGeometry(0.198, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.54),
       hairMat,
     );
     buzz.position.set(0, 0.172, -0.01);
@@ -83,7 +250,7 @@ function addHairGeometry(
   }
 
   const cap = new THREE.Mesh(
-    new THREE.SphereGeometry(0.207, 14, 10, 0, Math.PI * 2, 0, Math.PI * 0.58),
+    new THREE.SphereGeometry(0.207, 16, 12, 0, Math.PI * 2, 0, Math.PI * 0.58),
     hairMat,
   );
   cap.position.set(0, 0.178, -0.015);
@@ -91,17 +258,38 @@ function addHairGeometry(
   cap.castShadow = true;
   head.add(cap);
 
+  // Subtle sideburn/temple locks for natural hairline framing
+  for (const side of [-1, 1]) {
+    const temple = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.028, 0.065, 4, 8),
+      hairMat,
+    );
+    temple.position.set(side * 0.185, 0.16, 0.025);
+    temple.rotation.z = side * 0.12;
+    head.add(temple);
+  }
+
   switch (hairStyle) {
     case 'short_part': {
-      // Classic 1990s oiled side-part fringe
-      const fringe = new THREE.Mesh(
-        new THREE.BoxGeometry(0.26, 0.06, 0.12),
+      // Sculpted layered 1990s oiled side-part fringe (organic rounded locks instead of boxy cube)
+      const mainLock = new THREE.Mesh(
+        new THREE.SphereGeometry(0.145, 12, 8),
         hairMat,
       );
-      fringe.position.set(0.03, 0.28, 0.11);
-      fringe.rotation.z = -0.14;
-      fringe.rotation.x = 0.2;
-      head.add(fringe);
+      mainLock.scale.set(1.08, 0.34, 0.72);
+      mainLock.position.set(0.035, 0.285, 0.095);
+      mainLock.rotation.z = -0.16;
+      mainLock.rotation.x = 0.22;
+      head.add(mainLock);
+
+      const sideLock = new THREE.Mesh(
+        new THREE.SphereGeometry(0.09, 10, 8),
+        hairMat,
+      );
+      sideLock.scale.set(1.1, 0.36, 0.65);
+      sideLock.position.set(-0.085, 0.275, 0.105);
+      sideLock.rotation.z = 0.28;
+      head.add(sideLock);
       break;
     }
 
@@ -187,21 +375,23 @@ function addHairGeometry(
     }
 
     case 'swept_back': {
-      // Classic 1990s Bollywood-inspired swept back teen hair
+      // Sculpted 1990s Bollywood-inspired swept-back teen hair
       const crest = new THREE.Mesh(
-        new THREE.BoxGeometry(0.24, 0.09, 0.24),
+        new THREE.SphereGeometry(0.16, 12, 10),
         hairMat,
       );
-      crest.position.set(0, 0.31, 0.02);
+      crest.scale.set(0.95, 0.44, 1.08);
+      crest.position.set(0, 0.315, 0.02);
       crest.rotation.x = -0.26;
       crest.castShadow = true;
       head.add(crest);
 
       const backSweep = new THREE.Mesh(
-        new THREE.BoxGeometry(0.28, 0.14, 0.1),
+        new THREE.SphereGeometry(0.15, 10, 8),
         hairMat,
       );
-      backSweep.position.set(0, 0.16, -0.17);
+      backSweep.scale.set(1.12, 0.72, 0.62);
+      backSweep.position.set(0, 0.165, -0.16);
       head.add(backSweep);
       break;
     }
@@ -266,9 +456,9 @@ function addHairGeometry(
     }
 
     case 'wavy': {
-      // Medium wavy teen hair covering nape and ears
+      // Medium wavy teen hair covering nape and ears with organic soft front wave
       const backMass = new THREE.Mesh(
-        new THREE.SphereGeometry(0.21, 12, 10),
+        new THREE.SphereGeometry(0.21, 14, 10),
         hairMat,
       );
       backMass.scale.set(1.06, 0.92, 0.96);
@@ -277,11 +467,13 @@ function addHairGeometry(
       head.add(backMass);
 
       const wave = new THREE.Mesh(
-        new THREE.BoxGeometry(0.26, 0.07, 0.13),
+        new THREE.SphereGeometry(0.14, 12, 8),
         hairMat,
       );
-      wave.position.set(-0.02, 0.29, 0.09);
+      wave.scale.set(1.06, 0.38, 0.7);
+      wave.position.set(-0.02, 0.292, 0.092);
       wave.rotation.z = 0.15;
+      wave.rotation.x = 0.16;
       head.add(wave);
       break;
     }
@@ -533,15 +725,36 @@ export function createCustomizedCharacter(
         ? 0xeee2cc
         : preset.secondaryColor;
 
-  const topMat = new THREE.MeshStandardMaterial({
-    color: primaryOutfitColor,
-    roughness: 0.82,
-    metalness: 0.0,
-  });
-  const bottomMat = new THREE.MeshStandardMaterial({
-    color: secondaryBottomColor,
+  const topFabricKind =
+    outfitStyle === 'kurta_pyjama'
+      ? 'kurta_khadi'
+      : outfitStyle === 'frock'
+        ? 'frock_print'
+        : outfitStyle === 'school_uniform'
+          ? 'twill'
+          : 'cotton_weave';
+  const bottomFabricKind =
+    outfitStyle === 'kurta_pyjama' ? 'kurta_khadi' : 'twill';
+
+  const topMat = new THREE.MeshPhysicalMaterial({
+    map: getFabricTexture(topFabricKind, primaryOutfitColor),
+    color: 0xffffff,
     roughness: 0.86,
     metalness: 0.0,
+    sheen: 0.26,
+    sheenRoughness: 0.84,
+    sheenColor: new THREE.Color(primaryOutfitColor).lerp(
+      new THREE.Color(0xfff5e8),
+      0.35,
+    ),
+  });
+  const bottomMat = new THREE.MeshPhysicalMaterial({
+    map: getFabricTexture(bottomFabricKind, secondaryBottomColor),
+    color: 0xffffff,
+    roughness: 0.88,
+    metalness: 0.0,
+    sheen: 0.18,
+    sheenRoughness: 0.88,
   });
   const trimAccentMat = new THREE.MeshStandardMaterial({
     color:
@@ -552,171 +765,304 @@ export function createCustomizedCharacter(
   });
   const skinMat = new THREE.MeshPhysicalMaterial({
     color: preset.skinColor,
-    roughness: 0.58,
+    bumpMap: getSkinBumpTexture(),
+    bumpScale: 0.0022,
+    roughness: 0.55,
     metalness: 0.0,
-    sheen: 0.2,
-    sheenRoughness: 0.78,
+    sheen: 0.24,
+    sheenRoughness: 0.74,
     sheenColor: new THREE.Color(preset.skinColor).lerp(
       new THREE.Color(0xffe6d4),
-      0.45,
+      0.48,
     ),
   });
   const hairMat = new THREE.MeshStandardMaterial({
     color: preset.hairColor,
-    roughness: 0.72,
-    metalness: 0.04,
+    bumpMap: getHairStrandTexture(),
+    bumpScale: 0.004,
+    roughness: 0.56,
+    metalness: 0.08,
   });
   const sandalMat = new THREE.MeshStandardMaterial({
-    color: preset.sandalColor,
-    roughness: 0.74,
+    color: outfitStyle === 'school_uniform' ? 0x1d1e22 : preset.sandalColor,
+    roughness: 0.68,
   });
+  const sockMat = new THREE.MeshStandardMaterial({
+    color: 0xf4f0e6,
+    roughness: 0.88,
+  });
+
+  // Subtle realistic human proportion differentiation between children & teens
+  const isTeen = preset.ageGroup === 'teen';
+  const shoulderHalfW = isTeen ? 0.255 : 0.238;
+  const hipHalfW = isTeen ? 0.112 : 0.105;
 
   // Hip-level articulated body container
   const bodyRoot = new THREE.Group();
   bodyRoot.position.y = 0.68;
   root.add(bodyRoot);
 
-  // Articulated 2-segment legs (thigh + knee pivot -> shin + sandal)
+  // Articulated realistic 2-segment legs (tapered thigh -> rounded knee -> contoured calf -> realistic foot & chappal/shoe)
   const isLongPants = outfitStyle === 'kurta_pyjama';
   const makeLeg = (xOffset: number): { hip: THREE.Group; knee: THREE.Group } => {
     const hip = new THREE.Group();
     hip.position.set(xOffset, 0, 0);
 
     const thighMat = outfitStyle === 'frock' ? skinMat : bottomMat;
+    // Rounded hip cap so leg rotates cleanly without gap
+    const hipCap = new THREE.Mesh(
+      new THREE.SphereGeometry(0.082, 10, 8),
+      thighMat,
+    );
+    hip.add(hipCap);
+
     const thigh = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.088, 0.075, 0.34, 8),
+      new THREE.CylinderGeometry(0.084, 0.066, 0.34, 12),
       thighMat,
     );
     thigh.position.y = -0.16;
     thigh.castShadow = true;
     hip.add(thigh);
 
+    // Hem cuff for shorts
+    if (!isLongPants && outfitStyle !== 'frock') {
+      const cuff = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.072, 0.074, 0.055, 12),
+        bottomMat,
+      );
+      cuff.position.y = -0.27;
+      hip.add(cuff);
+    }
+
     const knee = new THREE.Group();
     knee.position.set(0, -0.32, 0);
     hip.add(knee);
 
-    const shin = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.068, 0.056, 0.32, 8),
+    const kneeCap = new THREE.Mesh(
+      new THREE.SphereGeometry(0.062, 10, 8),
       isLongPants ? bottomMat : skinMat,
     );
-    shin.position.y = -0.15;
-    shin.castShadow = true;
-    knee.add(shin);
+    knee.add(kneeCap);
 
-    const foot = new THREE.Mesh(
-      new THREE.BoxGeometry(0.13, 0.072, 0.23),
-      sandalMat,
+    // Contoured calf & slender ankle
+    const calf = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.062, 0.044, 0.31, 12),
+      isLongPants ? bottomMat : skinMat,
     );
-    foot.position.set(0, -0.32, 0.045);
-    foot.castShadow = true;
-    knee.add(foot);
+    calf.position.y = -0.155;
+    calf.castShadow = true;
+    knee.add(calf);
+
+    if (outfitStyle === 'school_uniform') {
+      // White cotton school sock + sculpted black canvas school shoe with white sole trim
+      const sock = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.051, 0.045, 0.13, 10),
+        sockMat,
+      );
+      sock.position.y = -0.245;
+      knee.add(sock);
+
+      const shoeUpper = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.052, 0.105, 5, 10),
+        sandalMat,
+      );
+      shoeUpper.rotation.x = Math.PI / 2;
+      shoeUpper.scale.set(1.06, 1.0, 0.78);
+      shoeUpper.position.set(0, -0.322, 0.048);
+      shoeUpper.castShadow = true;
+      knee.add(shoeUpper);
+
+      const sole = new THREE.Mesh(
+        new THREE.BoxGeometry(0.108, 0.022, 0.215),
+        sockMat,
+      );
+      sole.position.set(0, -0.352, 0.048);
+      knee.add(sole);
+    } else {
+      // Sculpted human foot + authentic 1990s Indian chappal (sandal sole & V-strap)
+      const footMesh = new THREE.Mesh(
+        new THREE.CapsuleGeometry(0.046, 0.095, 5, 10),
+        skinMat,
+      );
+      footMesh.rotation.x = Math.PI / 2;
+      footMesh.scale.set(1.04, 1.0, 0.72);
+      footMesh.position.set(0, -0.318, 0.046);
+      footMesh.castShadow = true;
+      knee.add(footMesh);
+
+      const chappalSole = new THREE.Mesh(
+        new THREE.BoxGeometry(0.112, 0.022, 0.22),
+        sandalMat,
+      );
+      chappalSole.position.set(0, -0.35, 0.048);
+      chappalSole.castShadow = true;
+      knee.add(chappalSole);
+
+      // Classic Y / V sandal straps across top of foot
+      for (const s of [-1, 1]) {
+        const strap = new THREE.Mesh(
+          new THREE.BoxGeometry(0.018, 0.012, 0.105),
+          sandalMat,
+        );
+        strap.position.set(s * 0.025, -0.292, 0.068);
+        strap.rotation.y = s * -0.32;
+        strap.rotation.x = 0.22;
+        knee.add(strap);
+      }
+    }
 
     return { hip, knee };
   };
 
-  const leftLegParts = makeLeg(-0.12);
-  const rightLegParts = makeLeg(0.12);
+  const leftLegParts = makeLeg(-hipHalfW);
+  const rightLegParts = makeLeg(hipHalfW);
   bodyRoot.add(leftLegParts.hip, rightLegParts.hip);
 
-  // Torso group pivoted at waist
+  // Torso group pivoted at waist with natural sculpted human anatomy (zero boxy blocks!)
   const torso = new THREE.Group();
   bodyRoot.add(torso);
 
-  // Waist / Hips + Outfit-specific silhouette
+  // Sculpted pelvis & lower waist
   const hipsMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(0.4, 0.16, 0.24),
+    new THREE.CylinderGeometry(0.185, 0.195, 0.18, 16),
     outfitStyle === 'frock' ? topMat : bottomMat,
   );
-  hipsMesh.position.y = 0.04;
+  hipsMesh.scale.set(1.04, 1.0, 0.68);
+  hipsMesh.position.y = 0.045;
   hipsMesh.castShadow = true;
   torso.add(hipsMesh);
 
-  const chestMesh = new THREE.Mesh(
-    new THREE.BoxGeometry(0.43, 0.48, 0.26),
-    topMat,
-  );
-  chestMesh.position.y = 0.34;
+  // Sculpted contoured upper torso (anatomical waist -> ribcage -> broad chest -> tapered shoulders)
+  const torsoLathePts = [
+    new THREE.Vector2(0.0, 0.0),
+    new THREE.Vector2(0.172, 0.02), // waist
+    new THREE.Vector2(0.184, 0.14), // lower ribcage
+    new THREE.Vector2(isTeen ? 0.218 : 0.205, 0.34), // chest
+    new THREE.Vector2(isTeen ? 0.228 : 0.212, 0.45), // upper chest / shoulders
+    new THREE.Vector2(0.145, 0.515), // trapezius slope
+    new THREE.Vector2(0.088, 0.535), // collar base
+  ];
+  const torsoGeo = new THREE.LatheGeometry(torsoLathePts, 18);
+  const chestMesh = new THREE.Mesh(torsoGeo, topMat);
+  chestMesh.scale.set(1.0, 1.0, 0.64);
+  chestMesh.position.y = 0.085;
   chestMesh.castShadow = true;
+  chestMesh.receiveShadow = true;
   torso.add(chestMesh);
 
-  // Collar
+  // Anatomical neck cylinder bridging shoulders seamlessly into head
+  const neckMesh = new THREE.Mesh(
+    new THREE.CylinderGeometry(0.068, 0.078, 0.13, 12),
+    skinMat,
+  );
+  neckMesh.position.y = 0.635;
+  neckMesh.castShadow = true;
+  torso.add(neckMesh);
+
+  // Crisp folded shirt/kurta collar ring
   const collar = new THREE.Mesh(
-    new THREE.CylinderGeometry(0.145, 0.175, 0.08, 10),
+    new THREE.TorusGeometry(0.095, 0.024, 8, 16),
     topMat,
   );
-  collar.position.y = 0.59;
+  collar.rotation.x = Math.PI / 2 + 0.12;
+  collar.scale.set(1.05, 0.9, 1.0);
+  collar.position.set(0, 0.605, 0.01);
   torso.add(collar);
 
   // Outfit-specific traditional 1990s Indian garment details
   if (outfitStyle === 'kurta_pyjama') {
     // Flowing knee-length kurta hem & embroidered placket down chest
     const kurtaSkirt = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.235, 0.28, 0.42, 12),
+      new THREE.CylinderGeometry(0.19, 0.255, 0.44, 16),
       topMat,
     );
-    kurtaSkirt.scale.set(1.0, 1.0, 0.68);
-    kurtaSkirt.position.y = -0.07;
+    kurtaSkirt.scale.set(1.02, 1.0, 0.68);
+    kurtaSkirt.position.y = -0.075;
     kurtaSkirt.castShadow = true;
     torso.add(kurtaSkirt);
 
     const placket = new THREE.Mesh(
-      new THREE.BoxGeometry(0.065, 0.28, 0.025),
+      new THREE.BoxGeometry(0.056, 0.27, 0.024),
       trimAccentMat,
     );
-    placket.position.set(0, 0.42, 0.132);
+    placket.position.set(0, 0.42, 0.134);
     torso.add(placket);
   } else if (outfitStyle === 'frock') {
     // Flared pleated 1990s village cotton frock with waist sash & contrast border
     const skirt = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.21, 0.39, 0.48, 14),
+      new THREE.CylinderGeometry(0.185, 0.38, 0.49, 18),
       topMat,
     );
-    skirt.scale.set(1.0, 1.0, 0.85);
-    skirt.position.y = -0.08;
+    skirt.scale.set(1.0, 1.0, 0.84);
+    skirt.position.y = -0.085;
     skirt.castShadow = true;
     torso.add(skirt);
 
     const hemTrim = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.365, 0.395, 0.075, 14),
+      new THREE.CylinderGeometry(0.355, 0.385, 0.075, 18),
       bottomMat,
     );
-    hemTrim.scale.set(1.0, 1.0, 0.85);
-    hemTrim.position.y = -0.29;
+    hemTrim.scale.set(1.0, 1.0, 0.84);
+    hemTrim.position.y = -0.295;
     torso.add(hemTrim);
 
     const sash = new THREE.Mesh(
-      new THREE.BoxGeometry(0.45, 0.075, 0.285),
+      new THREE.CylinderGeometry(0.188, 0.194, 0.072, 16),
       trimAccentMat,
     );
-    sash.position.y = 0.13;
+    sash.scale.set(1.02, 1.0, 0.72);
+    sash.position.y = 0.12;
     torso.add(sash);
   } else if (outfitStyle === 'school_uniform') {
-    // Crisp 1990s Indian school tie, belt, and pleated skirt or khaki shorts
-    const tie = new THREE.Mesh(
-      new THREE.BoxGeometry(0.058, 0.32, 0.022),
+    // Crisp 1990s Indian school tie with knot, belt with brass buckle, and pleated skirt or khaki shorts
+    const tieKnot = new THREE.Mesh(
+      new THREE.SphereGeometry(0.028, 8, 8),
       trimAccentMat,
     );
-    tie.position.set(0, 0.39, 0.135);
+    tieKnot.position.set(0, 0.56, 0.118);
+    torso.add(tieKnot);
+
+    const tie = new THREE.Mesh(
+      new THREE.BoxGeometry(0.052, 0.32, 0.018),
+      trimAccentMat,
+    );
+    tie.position.set(0, 0.39, 0.132);
     torso.add(tie);
 
     const belt = new THREE.Mesh(
-      new THREE.BoxGeometry(0.425, 0.06, 0.265),
-      new THREE.MeshStandardMaterial({ color: 0x2d2219, roughness: 0.65 }),
+      new THREE.CylinderGeometry(0.188, 0.192, 0.055, 16),
+      new THREE.MeshStandardMaterial({ color: 0x261d15, roughness: 0.58 }),
     );
-    belt.position.y = 0.11;
+    belt.scale.set(1.04, 1.0, 0.69);
+    belt.position.y = 0.105;
     torso.add(belt);
 
+    const buckle = new THREE.Mesh(
+      new THREE.BoxGeometry(0.055, 0.048, 0.022),
+      new THREE.MeshStandardMaterial({
+        color: 0xd4a64a,
+        roughness: 0.32,
+        metalness: 0.82,
+      }),
+    );
+    buckle.position.set(0, 0.105, 0.138);
+    torso.add(buckle);
+
     const pocket = new THREE.Mesh(
-      new THREE.BoxGeometry(0.09, 0.09, 0.015),
+      new THREE.BoxGeometry(0.082, 0.086, 0.014),
       bottomMat,
     );
-    pocket.position.set(0.12, 0.41, 0.133);
+    pocket.position.set(0.1, 0.42, 0.128);
     torso.add(pocket);
 
     // Pinafore pleats for girls in school uniform
-    if (preset.hairStyle === 'high_bun' || preset.hairStyle === 'twin_braids' || preset.hairStyle === 'bob_band') {
+    if (
+      preset.hairStyle === 'high_bun' ||
+      preset.hairStyle === 'twin_braids' ||
+      preset.hairStyle === 'bob_band'
+    ) {
       const uniformSkirt = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.215, 0.34, 0.42, 12),
+        new THREE.CylinderGeometry(0.19, 0.33, 0.42, 16),
         bottomMat,
       );
       uniformSkirt.scale.set(1.0, 1.0, 0.8);
@@ -725,28 +1071,51 @@ export function createCustomizedCharacter(
       torso.add(uniformSkirt);
     }
   } else {
-    // Shirt & Shorts: front button strip & chest pocket
+    // Shirt & Shorts: front button placket, tiny buttons & chest pocket
     const buttonStrip = new THREE.Mesh(
-      new THREE.BoxGeometry(0.045, 0.42, 0.016),
+      new THREE.BoxGeometry(0.042, 0.41, 0.016),
       trimAccentMat,
     );
     buttonStrip.position.set(0, 0.35, 0.132);
     torso.add(buttonStrip);
+
+    const btnMat = new THREE.MeshStandardMaterial({
+      color: 0xf4ecdc,
+      roughness: 0.4,
+    });
+    for (let b = 0; b < 4; b++) {
+      const btn = new THREE.Mesh(
+        new THREE.SphereGeometry(0.011, 6, 6),
+        btnMat,
+      );
+      btn.position.set(0, 0.21 + b * 0.095, 0.142);
+      torso.add(btn);
+    }
   }
 
-  // Articulated 2-segment arms (shoulder -> upperArm -> elbow -> forearm/hand)
+  // Articulated 2-segment realistic arms (deltoid cap -> tapered upperArm -> elbow joint -> tapered forearm -> detailed sculpted hand!)
   const isLongSleeve = outfitStyle === 'kurta_pyjama';
   const makeArm = (
     xOffset: number,
   ): { shoulder: THREE.Group; elbow: THREE.Group } => {
+    const side = xOffset < 0 ? -1 : 1;
     const shoulder = new THREE.Group();
-    shoulder.position.set(xOffset, 0.52, 0);
+    shoulder.position.set(xOffset, 0.525, 0);
 
-    const upperArm = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.076, 0.066, 0.24, 8),
+    // Rounded deltoid sleeve cap seamlessly joining torso
+    const deltoid = new THREE.Mesh(
+      new THREE.SphereGeometry(0.072, 10, 8),
       topMat,
     );
-    upperArm.position.y = -0.11;
+    deltoid.scale.set(0.95, 1.0, 0.92);
+    deltoid.castShadow = true;
+    shoulder.add(deltoid);
+
+    const upperArm = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.064, 0.056, 0.23, 10),
+      topMat,
+    );
+    upperArm.position.y = -0.115;
     upperArm.castShadow = true;
     shoulder.add(upperArm);
 
@@ -754,28 +1123,62 @@ export function createCustomizedCharacter(
     elbow.position.set(0, -0.23, 0);
     shoulder.add(elbow);
 
-    const forearm = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.056, 0.047, 0.26, 8),
+    const elbowJoint = new THREE.Mesh(
+      new THREE.SphereGeometry(0.051, 8, 8),
       isLongSleeve ? topMat : skinMat,
     );
-    forearm.position.y = -0.12;
+    elbow.add(elbowJoint);
+
+    const forearm = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.05, 0.039, 0.245, 10),
+      isLongSleeve ? topMat : skinMat,
+    );
+    forearm.position.y = -0.122;
     forearm.castShadow = true;
     elbow.add(forearm);
 
-    const hand = new THREE.Mesh(new THREE.SphereGeometry(0.054, 8, 8), skinMat);
-    hand.position.y = -0.26;
-    elbow.add(hand);
+    // Realistic sculpted human hand (palm + angled thumb + tapered curved fingers)
+    const handGroup = new THREE.Group();
+    handGroup.position.set(0, -0.255, 0);
+    elbow.add(handGroup);
+
+    const palm = new THREE.Mesh(
+      new THREE.BoxGeometry(0.048, 0.068, 0.032),
+      skinMat,
+    );
+    palm.position.set(0, -0.025, 0.004);
+    handGroup.add(palm);
+
+    // Tapered finger cluster curved naturally inward
+    const fingers = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.024, 0.038, 4, 8),
+      skinMat,
+    );
+    fingers.scale.set(1.05, 1.0, 0.62);
+    fingers.position.set(0, -0.072, 0.012);
+    fingers.rotation.x = 0.22;
+    handGroup.add(fingers);
+
+    // Distinct anatomical thumb angled inward toward body
+    const thumb = new THREE.Mesh(
+      new THREE.CapsuleGeometry(0.013, 0.028, 4, 6),
+      skinMat,
+    );
+    thumb.position.set(-side * 0.03, -0.034, 0.022);
+    thumb.rotation.z = side * 0.45;
+    thumb.rotation.x = 0.35;
+    handGroup.add(thumb);
 
     return { shoulder, elbow };
   };
 
-  const leftArmParts = makeArm(-0.285);
-  const rightArmParts = makeArm(0.285);
+  const leftArmParts = makeArm(-shoulderHalfW);
+  const rightArmParts = makeArm(shoulderHalfW);
   torso.add(leftArmParts.shoulder, rightArmParts.shoulder);
 
   // Head + Sculpted Human Facial Features + Hairstyle
   const head = new THREE.Group();
-  head.position.set(0, 0.64, 0);
+  head.position.set(0, 0.665, 0);
   torso.add(head);
 
   const faceRig = buildDetailedCharacterFace(
@@ -829,6 +1232,10 @@ export function createCustomizedCharacter(
   }
   head.add(dizzyStars);
 
+  // Track angular yaw velocity internally so turning lean & head-lead work automatically across singleplayer & multiplayer!
+  let prevRootYaw = root.rotation.y;
+  let smoothTurnRate = 0;
+
   // Reusable smooth animation controller
   const rig: CharacterRig = {
     root,
@@ -869,6 +1276,14 @@ export function createCustomizedCharacter(
       airHeight = 0,
     }: CharacterAnimationInput) {
       rig.idlePhase += dt;
+      // Measure smooth turning rate (rad/sec) from root yaw changes
+      let yawDelta = root.rotation.y - prevRootYaw;
+      while (yawDelta > Math.PI) yawDelta -= Math.PI * 2;
+      while (yawDelta < -Math.PI) yawDelta += Math.PI * 2;
+      prevRootYaw = root.rotation.y;
+      const rawTurnRate = dt > 0.0005 ? THREE.MathUtils.clamp(yawDelta / dt, -6, 6) : 0;
+      smoothTurnRate = THREE.MathUtils.damp(smoothTurnRate, rawTurnRate, 10, dt);
+
       const safeAir = Math.max(0, airHeight);
       shadowPlane.position.y = 0.03 - safeAir;
       const shadowScale = Math.max(0.55, 1 - safeAir * 0.25);
@@ -1469,31 +1884,38 @@ export function createCustomizedCharacter(
       let headY = lookAroundPhase ? Math.sin(lookAroundPhase) * 0.58 : 0;
       let headZ = 0;
 
+      const turnBank = THREE.MathUtils.clamp(smoothTurnRate * 0.045, -0.18, 0.18);
+      const turnHeadLead = THREE.MathUtils.clamp(smoothTurnRate * 0.08, -0.26, 0.26);
+
       if (!isMoving) {
-        // Breathing Idle / Stationary Crouch / Hiding Behind Wall or Object
-        const breathe = Math.sin(rig.idlePhase * 2.4) * 0.014;
-        const sway = Math.sin(rig.idlePhase * 1.2) * 0.025;
+        // Natural Breathing Idle, Relaxed Weight-Shift & In-Place Turn Step
+        const breathe = Math.sin(rig.idlePhase * 2.25) * 0.014;
+        const sway = Math.sin(rig.idlePhase * 1.05) * 0.032;
+        const weightShift = Math.sin(rig.idlePhase * 0.85) * 0.022;
+        const idleTurnStep = Math.min(1, Math.abs(smoothTurnRate) * 0.22);
+        const pivotStep = Math.sin(rig.idlePhase * 7.5) * 0.16 * idleTurnStep;
 
         targetHipY = 0.68 - c * 0.31 - cov * 0.06 + breathe;
-        targetTorsoX = c * 0.44 + cov * 0.18;
-        targetTorsoY = sway;
-        targetTorsoZ = 0;
+        targetTorsoX = c * 0.44 + cov * 0.18 + Math.sin(rig.idlePhase * 2.25) * 0.015;
+        targetTorsoY = sway + turnHeadLead * 0.35;
+        targetTorsoZ = weightShift * (1 - c) - turnBank * 0.35;
 
-        lHipX = -c * 0.88 - cov * 0.14;
-        rHipX = -c * 0.88 - cov * 0.14;
-        lKneeX = c * 1.42 + cov * 0.22;
-        rKneeX = c * 1.42 + cov * 0.22;
+        lHipX = -c * 0.88 - cov * 0.14 + pivotStep;
+        rHipX = -c * 0.88 - cov * 0.14 - pivotStep;
+        lKneeX = c * 1.42 + cov * 0.22 + Math.max(0, pivotStep) * 0.75 + 0.04;
+        rKneeX = c * 1.42 + cov * 0.22 + Math.max(0, -pivotStep) * 0.75 + 0.04;
 
-        // When hiding behind a wall/object, hug arms close to knees and peek cautiously left & right!
+        // Relaxed natural arms with gentle breathing swing (or hugged close when hiding behind cover)
         const peekCycle = Math.sin(rig.idlePhase * 1.7);
-        lArmX = -c * 0.62 - cov * 0.35;
-        rArmX = -c * 0.62 - cov * 0.35;
-        lArmZ = 0.09 + c * 0.14 - cov * 0.16;
-        rArmZ = -0.09 - c * 0.14 + cov * 0.16;
-        lElbowX = -0.18 - c * 0.52 - cov * 0.48;
-        rElbowX = -0.18 - c * 0.52 - cov * 0.48;
+        const armBreath = Math.sin(rig.idlePhase * 2.25) * 0.025;
+        lArmX = -c * 0.62 - cov * 0.35 + armBreath;
+        rArmX = -c * 0.62 - cov * 0.35 - armBreath * 0.6;
+        lArmZ = 0.1 + c * 0.14 - cov * 0.16;
+        rArmZ = -0.1 - c * 0.14 + cov * 0.16;
+        lElbowX = -0.22 - c * 0.52 - cov * 0.48;
+        rElbowX = -0.22 - c * 0.52 - cov * 0.48;
 
-        headX = -c * 0.34 - cov * 0.14;
+        headX = -c * 0.34 - cov * 0.14 + Math.sin(rig.idlePhase * 1.4) * 0.022;
         if (!lookAroundPhase) {
           if (cov > 0.25) {
             headY = peekCycle * 0.65 * cov;
@@ -1509,18 +1931,19 @@ export function createCustomizedCharacter(
             headZ = Math.sin(rig.idlePhase * 1.45) * 0.065;
             targetTorsoY += THREE.MathUtils.clamp(headLookYaw * 0.18, -0.14, 0.14);
           } else {
-            headY = Math.sin(rig.idlePhase * 0.8) * 0.14;
+            headY = Math.sin(rig.idlePhase * 0.75) * 0.16 + turnHeadLead * 0.85;
+            headZ = Math.sin(rig.idlePhase * 0.6) * 0.035;
           }
         }
       } else if (state === 'sneak') {
-        // Cautious crouched tiptoe sneaking
+        // Cautious crouched tiptoe sneaking with smooth turn lean
         const step = sinW * 0.42;
         const bob = Math.abs(cosW) * 0.032;
 
         targetHipY = 0.68 - 0.3 + bob;
         targetTorsoX = 0.52;
         targetTorsoY = -sinW * 0.14;
-        targetTorsoZ = sinW * 0.05;
+        targetTorsoZ = sinW * 0.05 - turnBank * 0.5;
 
         lHipX = -0.78 + step;
         rHipX = -0.78 - step;
@@ -1535,54 +1958,58 @@ export function createCustomizedCharacter(
         lElbowX = -0.82;
         rElbowX = -0.82;
         headX = -0.42;
+        if (!lookAroundPhase) headY = turnHeadLead * 0.8;
       } else if (isRunning) {
-        // Energetic full running cycle: forward sprint lean, high knee lift, pumping elbows
-        const stride = sinW * 0.88;
-        const bounce = Math.abs(cosW) * 0.095;
+        // Energetic athletic running biomechanics: forward drive, high knee lift, banking into turns!
+        const stride = sinW * 0.9;
+        const bounce = Math.abs(cosW) * 0.09;
 
-        targetHipY = 0.68 + bounce - 0.04;
-        targetTorsoX = 0.24;
-        targetTorsoY = -sinW * 0.2;
-        targetTorsoZ = sinW * 0.045;
+        targetHipY = 0.68 + bounce - 0.042;
+        targetTorsoX = 0.25;
+        targetTorsoY = -sinW * 0.21;
+        targetTorsoZ = sinW * 0.04 - turnBank * 1.15;
 
-        lHipX = stride - 0.12;
-        rHipX = -stride - 0.12;
-        lKneeX = Math.max(0.08, -cosW * 0.98 + 0.32);
-        rKneeX = Math.max(0.08, cosW * 0.98 + 0.32);
+        lHipX = stride - 0.14;
+        rHipX = -stride - 0.14;
+        lKneeX = Math.max(0.08, -cosW * 1.02 + 0.34);
+        rKneeX = Math.max(0.08, cosW * 1.02 + 0.34);
 
-        lArmX = -stride * 1.05;
-        rArmX = stride * 1.05;
-        lArmZ = 0.16;
-        rArmZ = -0.16;
-        lElbowX = -1.18 + Math.max(0, -sinW) * 0.28;
-        rElbowX = -1.18 + Math.max(0, sinW) * 0.28;
+        lArmX = -stride * 1.08;
+        rArmX = stride * 1.08;
+        lArmZ = 0.17;
+        rArmZ = -0.17;
+        lElbowX = -1.22 + Math.max(0, -sinW) * 0.32;
+        rElbowX = -1.22 + Math.max(0, sinW) * 0.32;
         headX = -0.16;
+        if (!lookAroundPhase) headY = turnHeadLead;
       } else {
-        // Natural relaxed walking gait
-        const amp = Math.min(0.56, moveSpeed * 0.15);
+        // Natural fluid human walking gait with heel-strike rhythm & turn banking
+        const amp = Math.min(0.58, moveSpeed * 0.155);
         const stride = sinW * amp;
-        const bounce = Math.abs(cosW) * 0.045;
+        const bounce = Math.abs(cosW) * 0.042;
 
-        targetHipY = 0.68 + bounce;
-        targetTorsoX = 0.07;
-        targetTorsoY = -sinW * 0.1;
-        targetTorsoZ = sinW * 0.025;
+        targetHipY = 0.68 + bounce - 0.01;
+        targetTorsoX = 0.075;
+        targetTorsoY = -sinW * 0.115;
+        targetTorsoZ = sinW * 0.028 - turnBank * 0.72;
 
-        lHipX = stride;
-        rHipX = -stride;
-        lKneeX = Math.max(0.04, -cosW * 0.55 + 0.14);
-        rKneeX = Math.max(0.04, cosW * 0.55 + 0.14);
+        lHipX = stride - 0.03;
+        rHipX = -stride - 0.03;
+        lKneeX = Math.max(0.05, -cosW * 0.58 + 0.15);
+        rKneeX = Math.max(0.05, cosW * 0.58 + 0.15);
 
-        lArmX = -stride * 0.82;
-        rArmX = stride * 0.82;
-        lArmZ = 0.1;
-        rArmZ = -0.1;
-        lElbowX = -0.35 + Math.max(0, -sinW) * 0.18;
-        rElbowX = -0.35 + Math.max(0, sinW) * 0.18;
+        lArmX = -stride * 0.86;
+        rArmX = stride * 0.86;
+        lArmZ = 0.11;
+        rArmZ = -0.11;
+        lElbowX = -0.34 + Math.max(0, -sinW) * 0.22;
+        rElbowX = -0.34 + Math.max(0, sinW) * 0.22;
         headX = -0.04;
         if (!lookAroundPhase && (isConversing || Math.abs(headLookYaw) > 0.01)) {
           headY = THREE.MathUtils.clamp(headLookYaw * 0.65, -0.45, 0.45);
           headX += THREE.MathUtils.clamp(headLookPitch * 0.5, -0.2, 0.2);
+        } else if (!lookAroundPhase) {
+          headY = turnHeadLead * 0.9;
         }
       }
 

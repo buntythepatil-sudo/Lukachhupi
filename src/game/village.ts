@@ -22,6 +22,10 @@ import {
   buildVillageTemple,
 } from './villageProps';
 import { addVintageVehicle, createMapContext } from './mapHelpers';
+import {
+  addMudHouseInteriorFurnishings,
+  applyTraditionalVillageAddons,
+} from './villageAddons';
 
 export interface VillageBuildResult {
   group: THREE.Group;
@@ -35,6 +39,7 @@ export interface VillageBuildResult {
   spawnPoints?: LevelSpawnPoints;
   templeBells?: TempleBellInteractive[];
   seats?: SeatSpot[];
+  animate?: (elapsed: number, dt: number) => void;
 }
 
 interface HouseSpec {
@@ -249,6 +254,7 @@ function localBoxToWorldCollider(
     minZ: worldZ - halfZ,
     maxZ: worldZ + halfZ,
     blocksSight: true,
+    ...(spec.roofStyle === 'terrace' ? { topY: spec.height + 0.14 } : {}),
   };
 }
 
@@ -363,6 +369,39 @@ function buildMudHouse(
     innerMatka.position.set(-width * 0.32, plinthH + 0.01, -depth * 0.28);
     innerMatka.castShadow = true;
     group.add(innerMatka);
+
+    // Authentic 1995 interior furnishings: wooden cot/bed, cupboard, earthen chulha & storage sacks
+    addMudHouseInteriorFurnishings(
+      group,
+      width,
+      depth,
+      plinthH,
+      wallThick,
+      spec.trimColor,
+      textures,
+    );
+
+    // Colorful painted lower exterior dado trim band (geru / indigo village limewash accent)
+    const dadoH = 0.62;
+    const dadoY = plinthH + dadoH * 0.5;
+    const dadoMat = new THREE.MeshStandardMaterial({
+      color: spec.trimColor,
+      roughness: 0.86,
+      metalness: 0.02,
+    });
+    const backDado = new THREE.Mesh(
+      new THREE.BoxGeometry(width + 0.04, dadoH, 0.04),
+      dadoMat,
+    );
+    backDado.position.set(0, dadoY, -depth * 0.5 - 0.01);
+    const leftDado = new THREE.Mesh(
+      new THREE.BoxGeometry(0.04, dadoH, depth + 0.04),
+      dadoMat,
+    );
+    leftDado.position.set(-width * 0.5 - 0.01, dadoY, 0);
+    const rightDado = leftDado.clone();
+    rightDado.position.x = width * 0.5 + 0.01;
+    group.add(backDado, leftDado, rightDado);
 
     // 4 hollow walls leaving open walkable front doorway
     const backWall = new THREE.Mesh(
@@ -707,6 +746,8 @@ function buildMudHouse(
       maxX: spec.x + innerHalfX,
       minZ: spec.z - innerHalfZ,
       maxZ: spec.z + innerHalfZ,
+      minY: -0.2,
+      maxY: plinthH + height - 0.15,
       doorX: spec.x + doorLocalZ * sin,
       doorZ: spec.z + doorLocalZ * cos,
       insideX: spec.x + insideLocalX * cos + insideLocalZ * sin,
@@ -1477,6 +1518,26 @@ export function buildIndianVillage(
     new THREE.Vector3(8.5, 0, -1.5), // Village Well
   ];
 
+  // 15. Additive 1995 Traditional Village details (connected rooftops, under-stair hiding pockets,
+  //     cattle shed, grain storage yard, north farm & well, bullock-cart tracks, lanterns & grass)
+  const addons = applyTraditionalVillageAddons(
+    group,
+    textures,
+    boxes,
+    circles,
+    hidingSpots,
+    houseInteriors,
+    seats,
+    patrolPoints,
+  );
+
+  const minimapLayout: VillageMinimapLayout = {
+    ...VILLAGE_MINIMAP_LAYOUT,
+    roads: [...VILLAGE_MINIMAP_LAYOUT.roads, ...addons.roads],
+    buildings: [...VILLAGE_MINIMAP_LAYOUT.buildings, ...addons.buildings],
+    landmarks: [...VILLAGE_MINIMAP_LAYOUT.landmarks, ...addons.landmarks],
+  };
+
   return {
     group,
     colliders: {
@@ -1489,7 +1550,7 @@ export function buildIndianVillage(
     hidingSpots,
     houseInteriors,
     pondWater: pond.waterMesh ?? null,
-    minimapLayout: VILLAGE_MINIMAP_LAYOUT,
+    minimapLayout,
     templeBells: temple.templeBells ?? [],
     seats,
   };

@@ -327,7 +327,7 @@ function getOrCreateFaceSkinTexture(
   preset: CharacterPreset,
   profile: CharacterFaceProfile,
 ): THREE.CanvasTexture {
-  const cacheKey = `${preset.id}_${preset.skinHex}_v2`;
+  const cacheKey = `${preset.id}_${preset.skinHex}_v3`;
   const existing = faceTextureCache.get(cacheKey);
   if (existing) return existing;
 
@@ -339,73 +339,104 @@ function getOrCreateFaceSkinTexture(
   const ctx = canvas.getContext('2d')!;
 
   const baseColor = new THREE.Color(preset.skinColor);
-  const highlightColor = baseColor.clone().lerp(new THREE.Color(0xfff0e2), 0.14);
-  const shadowColor = baseColor.clone().lerp(new THREE.Color(0x6e432c), 0.22);
-  const cheekColor = baseColor.clone().lerp(new THREE.Color(profile.cheekTintHex), 0.45);
+  const highlightColor = baseColor.clone().lerp(new THREE.Color(0xfff2e4), 0.19);
+  const warmSubsurface = baseColor.clone().lerp(new THREE.Color(0xd96b52), 0.24);
+  const shadowColor = baseColor.clone().lerp(new THREE.Color(0x633923), 0.28);
+  const cheekColor = baseColor.clone().lerp(new THREE.Color(profile.cheekTintHex), 0.48);
 
   // 1. Exact sRGB-matched skin base (matches arms, legs, neck & ears seamlessly)
   ctx.fillStyle = colorToSrgbCss(baseColor);
   ctx.fillRect(0, 0, W, H);
 
-  // 2. Subtle forehead, nose bridge & cheekbone tonal warmth
-  const foreheadGrad = ctx.createRadialGradient(512, 185, 10, 512, 195, 110);
-  foreheadGrad.addColorStop(0, colorToSrgbCss(highlightColor, 0.28));
+  // 2. Natural forehead, brow-ridge, nose bridge & cheekbone tonal warmth
+  const foreheadGrad = ctx.createRadialGradient(512, 182, 10, 512, 195, 118);
+  foreheadGrad.addColorStop(0, colorToSrgbCss(highlightColor, 0.34));
   foreheadGrad.addColorStop(1, colorToSrgbCss(baseColor, 0));
   ctx.fillStyle = foreheadGrad;
-  ctx.fillRect(360, 80, 304, 240);
+  ctx.fillRect(352, 76, 320, 248);
+
+  // Nose bridge & tip subtle specular skin warmth
+  const noseGrad = ctx.createRadialGradient(512, 266, 3, 512, 268, 30);
+  noseGrad.addColorStop(0, colorToSrgbCss(highlightColor, 0.32));
+  noseGrad.addColorStop(0.55, colorToSrgbCss(warmSubsurface, 0.14));
+  noseGrad.addColorStop(1, colorToSrgbCss(baseColor, 0));
+  ctx.fillStyle = noseGrad;
+  ctx.fillRect(478, 232, 68, 72);
 
   // Chin highlight
   const chinGrad = ctx.createRadialGradient(512, 344, 4, 512, 344, 52);
-  chinGrad.addColorStop(0, colorToSrgbCss(highlightColor, 0.22));
+  chinGrad.addColorStop(0, colorToSrgbCss(highlightColor, 0.26));
   chinGrad.addColorStop(1, colorToSrgbCss(baseColor, 0));
   ctx.fillStyle = chinGrad;
   ctx.fillRect(430, 290, 164, 110);
 
-  // 3. Soft natural cheek warmth (gentle healthy blush, no dark brown blotches)
+  // 3. Soft natural cheek warmth + delicate cheekbone highlight
   for (const side of [-1, 1]) {
     const cx = 512 + side * 78;
     const cy = 278;
-    const cGrad = ctx.createRadialGradient(cx, cy, 4, cx, cy, 56);
-    cGrad.addColorStop(0, colorToSrgbCss(cheekColor, 0.15));
+    const cGrad = ctx.createRadialGradient(cx, cy, 4, cx, cy, 58);
+    cGrad.addColorStop(0, colorToSrgbCss(cheekColor, 0.2));
+    cGrad.addColorStop(0.6, colorToSrgbCss(warmSubsurface, 0.08));
     cGrad.addColorStop(1, colorToSrgbCss(cheekColor, 0));
     ctx.fillStyle = cGrad;
-    ctx.fillRect(cx - 60, cy - 60, 120, 120);
+    ctx.fillRect(cx - 64, cy - 64, 128, 128);
+
+    // Upper zygomatic highlight catch
+    const zGrad = ctx.createRadialGradient(cx + side * 4, cy - 16, 2, cx + side * 4, cy - 16, 28);
+    zGrad.addColorStop(0, colorToSrgbCss(highlightColor, 0.2));
+    zGrad.addColorStop(1, colorToSrgbCss(highlightColor, 0));
+    ctx.fillStyle = zGrad;
+    ctx.fillRect(cx - 32, cy - 48, 64, 64);
+
+    // Subtle temple & jawline contour shading for natural facial sculpture
+    const jawGrad = ctx.createRadialGradient(512 + side * 124, 318, 8, 512 + side * 124, 318, 62);
+    jawGrad.addColorStop(0, colorToSrgbCss(shadowColor, 0.16));
+    jawGrad.addColorStop(1, colorToSrgbCss(shadowColor, 0));
+    ctx.fillStyle = jawGrad;
+    ctx.fillRect(512 + side * 124 - 66, 250, 132, 132);
   }
 
-  // 4. Soft orbital eye socket ambient occlusion
+  // 4. Soft orbital eye socket ambient occlusion & natural lower eyelid crease
   for (const side of [-1, 1]) {
     const ex = 512 + side * 54;
     const ey = 247;
-    const sockGrad = ctx.createRadialGradient(ex, ey, 6, ex, ey, 34);
-    sockGrad.addColorStop(0, colorToSrgbCss(shadowColor, 0.18));
-    sockGrad.addColorStop(0.7, colorToSrgbCss(shadowColor, 0.06));
+    const sockGrad = ctx.createRadialGradient(ex, ey, 6, ex, ey, 36);
+    sockGrad.addColorStop(0, colorToSrgbCss(shadowColor, 0.22));
+    sockGrad.addColorStop(0.7, colorToSrgbCss(shadowColor, 0.07));
     sockGrad.addColorStop(1, colorToSrgbCss(shadowColor, 0));
     ctx.fillStyle = sockGrad;
-    ctx.fillRect(ex - 38, ey - 38, 76, 76);
+    ctx.fillRect(ex - 40, ey - 40, 80, 80);
 
-    ctx.strokeStyle = colorToSrgbCss(shadowColor, 0.15);
-    ctx.lineWidth = 2;
+    ctx.strokeStyle = colorToSrgbCss(shadowColor, 0.19);
+    ctx.lineWidth = 2.1;
     ctx.beginPath();
-    ctx.arc(ex, ey + 5, 19, 0.25 * Math.PI, 0.75 * Math.PI);
+    ctx.arc(ex, ey + 5, 19, 0.24 * Math.PI, 0.76 * Math.PI);
+    ctx.stroke();
+
+    // Subtle upper eyelid fold line
+    ctx.strokeStyle = colorToSrgbCss(shadowColor, 0.17);
+    ctx.lineWidth = 1.6;
+    ctx.beginPath();
+    ctx.arc(ex, ey - 3, 20, 1.2 * Math.PI, 1.8 * Math.PI);
     ctx.stroke();
   }
 
-  // 5. Subtle under-lip dimple & far-underside neck transition (below chin at y > 432)
-  const underLipGrad = ctx.createRadialGradient(512, 327, 2, 512, 327, 24);
-  underLipGrad.addColorStop(0, colorToSrgbCss(shadowColor, 0.16));
+  // 5. Subtle under-lip dimple, nasolabial softness & far-underside neck transition
+  const underLipGrad = ctx.createRadialGradient(512, 327, 2, 512, 327, 25);
+  underLipGrad.addColorStop(0, colorToSrgbCss(shadowColor, 0.2));
   underLipGrad.addColorStop(1, colorToSrgbCss(shadowColor, 0));
   ctx.fillStyle = underLipGrad;
   ctx.fillRect(480, 300, 64, 54);
 
   const neckShadow = ctx.createLinearGradient(0, 432, 0, H);
   neckShadow.addColorStop(0, colorToSrgbCss(shadowColor, 0));
-  neckShadow.addColorStop(1, colorToSrgbCss(shadowColor, 0.2));
+  neckShadow.addColorStop(1, colorToSrgbCss(shadowColor, 0.24));
   ctx.fillStyle = neckShadow;
   ctx.fillRect(0, 432, W, H - 432);
 
   // Subtle philtrum vertical groove shading
   const philtrumGrad = ctx.createLinearGradient(512, 286, 512, 310);
-  philtrumGrad.addColorStop(0, colorToSrgbCss(shadowColor, 0.1));
+  philtrumGrad.addColorStop(0, colorToSrgbCss(shadowColor, 0.13));
   philtrumGrad.addColorStop(1, colorToSrgbCss(shadowColor, 0));
   ctx.fillStyle = philtrumGrad;
   ctx.fillRect(507, 286, 10, 24);
@@ -581,15 +612,23 @@ function getOrCreateEyeTexture(profile: CharacterFaceProfile): THREE.CanvasTextu
   ctx.arc(cx, cy, pupilR, 0, Math.PI * 2);
   ctx.fill();
 
-  // 4. Crisp specular catchlights (brings life to eyes at both close-up and distance)
-  ctx.fillStyle = 'rgba(255, 253, 245, 0.94)';
+  // 4. Crisp dual corneal catchlights & warm lower-iris light scatter (lifelike eye depth)
+  const lowerScatter = ctx.createRadialGradient(cx, cy + 16, 2, cx, cy + 16, 20);
+  lowerScatter.addColorStop(0, 'rgba(218, 165, 108, 0.34)');
+  lowerScatter.addColorStop(1, 'rgba(218, 165, 108, 0)');
+  ctx.fillStyle = lowerScatter;
   ctx.beginPath();
-  ctx.arc(cx + 11, cy - 11, 5.2, 0, Math.PI * 2);
+  ctx.arc(cx, cy + 16, 20, 0, Math.PI * 2);
   ctx.fill();
 
-  ctx.fillStyle = 'rgba(255, 250, 238, 0.55)';
+  ctx.fillStyle = 'rgba(255, 254, 248, 0.96)';
   ctx.beginPath();
-  ctx.arc(cx - 8, cy + 9, 2.3, 0, Math.PI * 2);
+  ctx.arc(cx + 11, cy - 11, 5.5, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = 'rgba(255, 250, 238, 0.62)';
+  ctx.beginPath();
+  ctx.arc(cx - 8, cy + 9, 2.5, 0, Math.PI * 2);
   ctx.fill();
 
   const texture = new THREE.CanvasTexture(canvas);

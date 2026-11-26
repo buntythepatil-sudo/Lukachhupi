@@ -831,19 +831,49 @@ export function buildVillageTemple(
   });
   const flameMat = new THREE.MeshBasicMaterial({ color: 0xffc75f });
 
-  // Stepped temple platform (jagati)
-  const step1 = new THREE.Mesh(new THREE.BoxGeometry(7.6, 0.28, 8.2), stoneMat);
-  step1.position.set(0, 0.14, 0.4);
+  // Stepped temple platform (jagati) — crisp 0.24m risers aligned cleanly with walkable colliders
+  const step1 = new THREE.Mesh(new THREE.BoxGeometry(7.6, 0.24, 8.2), stoneMat);
+  step1.position.set(0, 0.12, 0.4);
   step1.receiveShadow = true;
   step1.castShadow = true;
   group.add(step1);
 
   const step2 = new THREE.Mesh(new THREE.BoxGeometry(6.4, 0.24, 7.0), creamMat);
-  step2.position.set(0, 0.4, 0.3);
+  step2.position.set(0, 0.36, 0.3);
   step2.receiveShadow = true;
+  step2.castShadow = true;
   group.add(step2);
 
-  // Sanctum (garbhagriha)
+  // Carved 3-step front entrance staircase on the south porch approach (z = 3.8..5.1)
+  const frontStepSpecs = [
+    { zCenter: 4.86, depth: 0.46, topY: 0.16, mat: stoneMat },
+    { zCenter: 4.42, depth: 0.46, topY: 0.32, mat: stoneMat },
+    { zCenter: 3.98, depth: 0.46, topY: 0.48, mat: creamMat },
+  ];
+  const frontStepW = 3.1;
+  for (const fs of frontStepSpecs) {
+    const mesh = new THREE.Mesh(
+      new THREE.BoxGeometry(frontStepW, fs.topY, fs.depth),
+      fs.mat,
+    );
+    mesh.position.set(0, fs.topY * 0.5, fs.zCenter);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    group.add(mesh);
+  }
+  // Low decorative sandstone side curbs flanking the front temple steps
+  for (const side of [-1, 1]) {
+    const curb = new THREE.Mesh(
+      new THREE.BoxGeometry(0.24, 0.46, 1.36),
+      stoneMat,
+    );
+    curb.position.set(side * (frontStepW * 0.5 + 0.12), 0.23, 4.44);
+    curb.castShadow = true;
+    curb.receiveShadow = true;
+    group.add(curb);
+  }
+
+  // Sanctum (garbhagriha) seated flush on top of step2 (y = 0.48)
   const sanctumW = 4.6;
   const sanctumD = 4.4;
   const sanctumH = 3.2;
@@ -851,7 +881,7 @@ export function buildVillageTemple(
     new THREE.BoxGeometry(sanctumW, sanctumH, sanctumD),
     stoneMat,
   );
-  sanctum.position.set(0, 0.52 + sanctumH * 0.5, -0.6);
+  sanctum.position.set(0, 0.48 + sanctumH * 0.5, -0.6);
   sanctum.castShadow = true;
   sanctum.receiveShadow = true;
   group.add(sanctum);
@@ -861,11 +891,11 @@ export function buildVillageTemple(
     new THREE.BoxGeometry(1.5, 2.2, 0.25),
     new THREE.MeshStandardMaterial({ color: 0x3b2214, roughness: 0.92 }),
   );
-  doorArch.position.set(0, 0.52 + 1.1, 1.56);
+  doorArch.position.set(0, 0.48 + 1.1, 1.56);
   group.add(doorArch);
 
   const diyaFlame = new THREE.Mesh(new THREE.SphereGeometry(0.11, 8, 8), flameMat);
-  diyaFlame.position.set(0, 1.15, 1.72);
+  diyaFlame.position.set(0, 1.12, 1.72);
   group.add(diyaFlame);
 
   const diyaLight = new THREE.PointLight(0xffa748, 2.4, 9, 2);
@@ -945,10 +975,10 @@ export function buildVillageTemple(
   ];
   for (const [px, pz] of porchPillars) {
     const pillar = new THREE.Mesh(
-      new THREE.CylinderGeometry(0.14, 0.17, 2.7, 10),
+      new THREE.CylinderGeometry(0.14, 0.17, 2.74, 10),
       creamMat,
     );
-    pillar.position.set(px, 0.52 + 1.35, pz);
+    pillar.position.set(px, 0.48 + 1.37, pz);
     pillar.castShadow = true;
     group.add(pillar);
   }
@@ -1045,17 +1075,65 @@ export function buildVillageTemple(
   ];
 
   const boxes: BoxCollider[] = [
+    // Solid sanctum walls
     {
-      minX: x - sanctumW * 0.5 - 0.15,
-      maxX: x + sanctumW * 0.5 + 0.15,
-      minZ: z - 0.6 - sanctumD * 0.5 - 0.15,
-      maxZ: z - 0.6 + sanctumD * 0.5 + 0.15,
+      minX: x - sanctumW * 0.5 - 0.12,
+      maxX: x + sanctumW * 0.5 + 0.12,
+      minZ: z - 0.6 - sanctumD * 0.5 - 0.12,
+      maxZ: z - 0.6 + sanctumD * 0.5 + 0.12,
       blocksSight: true,
+    },
+    // Solid walkable lower temple platform step (step1: 7.6 x 8.2 centered at z+0.4, topY = 0.24)
+    {
+      minX: x - 3.8,
+      maxX: x + 3.8,
+      minZ: z + 0.4 - 4.1,
+      maxZ: z + 0.4 + 4.1,
+      blocksSight: false,
+      topY: 0.24,
+      climbable: true,
+    },
+    // Solid walkable upper temple platform step (step2: 6.4 x 7.0 centered at z+0.3, topY = 0.48)
+    {
+      minX: x - 3.2,
+      maxX: x + 3.2,
+      minZ: z + 0.3 - 3.5,
+      maxZ: z + 0.3 + 3.5,
+      blocksSight: false,
+      topY: 0.48,
+      climbable: true,
+    },
+    // Exact solid walkable front entrance staircase steps (3 smooth 0.16m risers)
+    ...frontStepSpecs.map((fs) => ({
+      minX: x - frontStepW * 0.5,
+      maxX: x + frontStepW * 0.5,
+      minZ: z + fs.zCenter - fs.depth * 0.5,
+      maxZ: z + fs.zCenter + fs.depth * 0.5,
+      blocksSight: false,
+      topY: fs.topY,
+      climbable: true,
+    })),
+    // Side stone curbs flanking the front temple entrance stairs
+    {
+      minX: x - frontStepW * 0.5 - 0.24,
+      maxX: x - frontStepW * 0.5,
+      minZ: z + 3.76,
+      maxZ: z + 5.12,
+      blocksSight: false,
+      topY: 0.46,
+    },
+    {
+      minX: x + frontStepW * 0.5,
+      maxX: x + frontStepW * 0.5 + 0.24,
+      minZ: z + 3.76,
+      maxZ: z + 5.12,
+      blocksSight: false,
+      topY: 0.46,
     },
   ];
   const circles: CircleCollider[] = [
-    { x: x - 1.75, z: z + 3.1, radius: 0.28, blocksSight: false },
-    { x: x + 1.75, z: z + 3.1, radius: 0.28, blocksSight: false },
+    { x: x - 1.75, z: z + 3.1, radius: 0.24, blocksSight: false },
+    { x: x + 1.75, z: z + 3.1, radius: 0.24, blocksSight: false },
   ];
   const hidingSpots: HidingSpot[] = [
     {
@@ -1662,6 +1740,20 @@ export function buildVillagePond(
       topY: 1.35,
       climbable: true,
     },
+    // Solid walkable stone bathing ghat steps on the west edge of the village pond
+    ...[0, 1, 2].map((s) => {
+      const cx = x - 7.1 + s * 0.55;
+      const topY = Number((0.43 - s * 0.1).toFixed(2));
+      return {
+        minX: cx - 0.55,
+        maxX: cx + 0.55,
+        minZ: z - 1.9,
+        maxZ: z + 1.9,
+        blocksSight: false,
+        topY,
+        climbable: true,
+      };
+    }),
   ];
   const hidingSpots: HidingSpot[] = [
     {

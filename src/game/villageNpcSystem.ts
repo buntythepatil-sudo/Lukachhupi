@@ -336,6 +336,30 @@ function getBlueprintForLevel(levelId: number): MapNpcBlueprint {
               { x: -19.5, z: -3.0 },
             ],
           },
+          {
+            archetype: 'man',
+            prop: 'jhola',
+            speed: 1.2,
+            minQuality: 'medium',
+            waypoints: [
+              { x: -29.8, z: -2.0 },
+              { x: -29.8, z: 6.5 },
+              { x: -20.5, z: 18.8 },
+              { x: -20.5, z: -2.0 },
+            ],
+          },
+          {
+            archetype: 'woman',
+            prop: 'matka',
+            speed: 1.18,
+            minQuality: 'high',
+            waypoints: [
+              { x: 28.8, z: -10.5 },
+              { x: 29.0, z: 12.0 },
+              { x: 22.0, z: 12.0 },
+              { x: 22.0, z: -10.5 },
+            ],
+          },
         ],
         cyclists: [
           {
@@ -427,6 +451,12 @@ function getBlueprintForLevel(levelId: number): MapNpcBlueprint {
             z: -5.4,
             archetypes: ['woman', 'woman'],
             minQuality: 'high',
+          },
+          {
+            x: 2.8,
+            z: -4.2,
+            archetypes: ['elder', 'man'],
+            minQuality: 'medium',
           },
         ],
         cricket: {
@@ -1339,6 +1369,84 @@ function getBlueprintForLevel(levelId: number): MapNpcBlueprint {
           { species: 'buffalo', x: -10.5, z: -24.5, roamRadius: 4.0, initialState: 'rest', minQuality: 'medium' },
           { species: 'cow', x: 34.5, z: 22.5, roamRadius: 4.5, minQuality: 'high' },
         ],
+      };
+
+    // LEVELS 9-15: Pixar 3D Maps ambient residents & animals
+    case 9:
+    case 10:
+    case 11:
+    case 12:
+    case 13:
+    case 14:
+    case 15:
+      return {
+        walkers: [
+          {
+            archetype: 'woman',
+            prop: 'basket',
+            speed: 1.3,
+            minQuality: 'low',
+            waypoints: [
+              { x: -12.0, z: -12.0 },
+              { x: 12.0, z: -12.0 },
+              { x: 12.0, z: 12.0 },
+              { x: -12.0, z: 12.0 },
+            ],
+          },
+          {
+            archetype: 'man',
+            prop: 'jhola',
+            speed: 1.35,
+            minQuality: 'low',
+            waypoints: [
+              { x: 14.0, z: -8.0 },
+              { x: -14.0, z: -8.0 },
+              { x: -14.0, z: 8.0 },
+              { x: 14.0, z: 8.0 },
+            ],
+          },
+          {
+            archetype: 'elder',
+            prop: 'stick',
+            speed: 0.95,
+            minQuality: 'medium',
+            waypoints: [
+              { x: -18.0, z: -16.0 },
+              { x: -18.0, z: 16.0 },
+              { x: 18.0, z: 16.0 },
+              { x: 18.0, z: -16.0 },
+            ],
+          },
+        ],
+        cyclists: [],
+        sitters: [],
+        marketPairs: [],
+        chatGroups: [
+          {
+            x: -7.5,
+            z: 6.5,
+            archetypes: ['child_boy', 'child_girl'],
+            minQuality: 'low',
+          },
+          {
+            x: 7.5,
+            z: -6.5,
+            archetypes: ['woman', 'elder'],
+            minQuality: 'medium',
+          },
+        ],
+        cricket: null,
+        animals:
+          levelId === 15
+            ? [
+                { species: 'dog', x: -8.5, z: 11.0, roamRadius: 5.0, minQuality: 'low' },
+                { species: 'goat', x: 12.0, z: -11.5, roamRadius: 4.5, minQuality: 'medium' },
+              ]
+            : [
+                { species: 'dog', x: -9.5, z: 9.5, roamRadius: 5.5, minQuality: 'low' },
+                { species: 'goat', x: 10.5, z: -10.5, roamRadius: 5.0, minQuality: 'medium' },
+                { species: 'cow', x: -19.0, z: 15.0, roamRadius: 4.0, minQuality: 'high' },
+              ],
       };
 
     // LEVEL 8: Festival Village (Diwali & Mela)
@@ -2681,16 +2789,35 @@ export class VillageNpcSystem {
           let dirX = toX / dist;
           let dirZ = toZ / dist;
 
-          // Gentle yield if player gets close so animals never obstruct gameplay
+          // Gentle yield if player gets close so animals never walk through standing players
           let speedBoost = 1.0;
-          if (hasPlayer && pDistSq < 2.4 * 2.4 && pDistSq > 0.01) {
+          if (hasPlayer && pDistSq < 2.65 * 2.65 && pDistSq > 0.01) {
             const pDist = Math.sqrt(pDistSq);
             const fromPx = an.x - px;
             const fromPz = an.z - pz;
-            dirX += (fromPx / pDist) * 1.05;
-            dirZ += (fromPz / pDist) * 1.05;
+            const repulseWeight =
+              an.species === 'cow' || an.species === 'buffalo' ? 1.55 : 1.05;
+            dirX += (fromPx / pDist) * repulseWeight;
+            dirZ += (fromPz / pDist) * repulseWeight;
             if (an.species === 'goat' || an.species === 'dog') {
               speedBoost = 1.38;
+            }
+          }
+
+          // Smooth animal-to-animal separation so cows, buffaloes & other animals never block or overlap each other
+          for (let j = 0; j < this.animals.length; j++) {
+            if (j === i) continue;
+            const other = this.animals[j];
+            if (QUALITY_RANK[other.minQuality] > rank) continue;
+            const sepDx = an.x - other.x;
+            const sepDz = an.z - other.z;
+            const minSep = an.radius + other.radius + 0.45;
+            const sepSq = sepDx * sepDx + sepDz * sepDz;
+            if (sepSq < minSep * minSep && sepSq > 0.0001) {
+              const sepD = Math.sqrt(sepSq);
+              const push = ((minSep - sepD) / minSep) * 1.9;
+              dirX += (sepDx / sepD) * push;
+              dirZ += (sepDz / sepD) * push;
             }
           }
 
@@ -2709,9 +2836,44 @@ export class VillageNpcSystem {
             stepDt,
           );
 
-          const nextX = an.x + Math.sin(an.rotY) * an.currentSpeed * stepDt;
-          const nextZ = an.z + Math.cos(an.rotY) * an.currentSpeed * stepDt;
+          let nextX = an.x + Math.sin(an.rotY) * an.currentSpeed * stepDt;
+          let nextZ = an.z + Math.cos(an.rotY) * an.currentSpeed * stepDt;
+
+          // Keep walking cows/buffaloes from encroaching directly onto the player's personal space
+          if (
+            hasPlayer &&
+            (an.species === 'cow' || an.species === 'buffalo')
+          ) {
+            const minPlayerDist = an.species === 'buffalo' ? 1.25 : 1.15;
+            const pdx = nextX - px;
+            const pdz = nextZ - pz;
+            const pdSq = pdx * pdx + pdz * pdz;
+            if (pdSq < minPlayerDist * minPlayerDist && pdSq > 0.0001) {
+              const pd = Math.sqrt(pdSq);
+              nextX = px + (pdx / pd) * minPlayerDist;
+              nextZ = pz + (pdz / pd) * minPlayerDist;
+              an.currentSpeed *= 0.65;
+            }
+          }
+
           this.resolveMovementObstacles(nextX, nextZ, an.radius, _avoidOut);
+
+          // Pairwise non-blocking nudge so two animals never intersect
+          for (let j = 0; j < this.animals.length; j++) {
+            if (j === i) continue;
+            const other = this.animals[j];
+            if (QUALITY_RANK[other.minQuality] > rank) continue;
+            const odx = _avoidOut.x - other.x;
+            const odz = _avoidOut.z - other.z;
+            const minSpace = an.radius + other.radius + 0.12;
+            const odSq = odx * odx + odz * odz;
+            if (odSq < minSpace * minSpace && odSq > 0.0001) {
+              const od = Math.sqrt(odSq);
+              const overlap = (minSpace - od) * 0.55;
+              _avoidOut.x += (odx / od) * overlap;
+              _avoidOut.z += (odz / od) * overlap;
+            }
+          }
 
           const movedSq =
             (_avoidOut.x - an.x) * (_avoidOut.x - an.x) +
@@ -2753,6 +2915,82 @@ export class VillageNpcSystem {
         mat.opacity = life < 0.25 ? life / 0.25 : 1;
       }
     }
+  }
+
+  /**
+   * Resolves accurate 3D oriented-capsule body collisions against all active cows and buffaloes.
+   * Prevents players and AI actors from walking through cows/buffaloes while preserving smooth
+   * natural sliding along their flanks, chest, and rump (and ignoring upper-floor actors above them).
+   */
+  public resolveLargeAnimalCollisions(
+    pos: THREE.Vector3,
+    actorRadius: number,
+  ): boolean {
+    const rank = QUALITY_RANK[this.quality];
+    let collided = false;
+
+    for (let i = 0; i < this.animals.length; i++) {
+      const an = this.animals[i];
+      if (an.species !== 'cow' && an.species !== 'buffalo') continue;
+      if (QUALITY_RANK[an.minQuality] > rank) continue;
+
+      // 3D vertical height check so players on balconies/rooftops above never hit ground animals
+      const bodyTopY =
+        an.state === 'rest'
+          ? 0.96
+          : an.species === 'buffalo'
+            ? 1.54
+            : 1.46;
+      if (pos.y >= bodyTopY) continue;
+
+      // Oriented 3D torso capsule segment matching actual cow/buffalo 3D mesh proportions
+      const isBuffalo = an.species === 'buffalo';
+      const rearOffset = isBuffalo ? -0.62 : -0.58;
+      const frontOffset = isBuffalo ? 0.72 : 0.66;
+      const bodyHalfWidth = isBuffalo ? 0.45 : 0.38;
+
+      const fx = Math.sin(an.rotY);
+      const fz = Math.cos(an.rotY);
+
+      const ax = an.x + fx * rearOffset;
+      const az = an.z + fz * rearOffset;
+      const bx = an.x + fx * frontOffset;
+      const bz = an.z + fz * frontOffset;
+
+      const segX = bx - ax;
+      const segZ = bz - az;
+      const segLenSq = segX * segX + segZ * segZ;
+
+      let t = 0.5;
+      if (segLenSq > 1e-6) {
+        t = ((pos.x - ax) * segX + (pos.z - az) * segZ) / segLenSq;
+        if (t < 0) t = 0;
+        else if (t > 1) t = 1;
+      }
+
+      const closestX = ax + segX * t;
+      const closestZ = az + segZ * t;
+      const dx = pos.x - closestX;
+      const dz = pos.z - closestZ;
+      const minDist = actorRadius + bodyHalfWidth;
+      const dSq = dx * dx + dz * dz;
+
+      if (dSq < minDist * minDist) {
+        collided = true;
+        if (dSq > 1e-6) {
+          const d = Math.sqrt(dSq);
+          const overlap = minDist - d;
+          pos.x += (dx / d) * overlap;
+          pos.z += (dz / d) * overlap;
+        } else {
+          // Fallback push perpendicular to animal flank
+          pos.x += fz * minDist;
+          pos.z -= fx * minDist;
+        }
+      }
+    }
+
+    return collided;
   }
 
   /**

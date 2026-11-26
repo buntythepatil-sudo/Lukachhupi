@@ -171,6 +171,7 @@ export interface LevelConfig {
   searchPauseFactor: number;
   aiHiderSpeedMultiplier: number;
   atmosphere: LevelAtmosphere;
+  alwaysUnlocked?: boolean;
 }
 
 export interface HudMatchResult {
