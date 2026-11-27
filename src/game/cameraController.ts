@@ -23,9 +23,11 @@ const FREE_MAX_Y = 26.0;
 const FREE_HORIZONTAL_SPEED = 12.5;
 const FREE_VERTICAL_SPEED = 8.5;
 
-const MIN_GROUND_Y = 0.44;
-const WALL_BUFFER = 0.38;
-const MIN_SAFE_DIST = 1.18; // Never clip inside character head/torso
+const MIN_GROUND_Y = 0.52;
+const WALL_BUFFER = 0.34;
+const MIN_SAFE_DIST = 2.15; // Keep comfortable third-person clearance behind character
+const HARD_MIN_RAY_DIST = 1.6; // Never slam right into the player's head/torso
+const INDOOR_MIN_PITCH = 0.66; // Smoothly look over house walls through faded roofs
 const MANUAL_FOLLOW_COOLDOWN = 2.4;
 
 const BASE_MOUSE_YAW_SENS = 0.0062;
@@ -42,6 +44,7 @@ const _rayOrigin = new THREE.Vector3();
 const _rightVec = new THREE.Vector3();
 const _upVec = new THREE.Vector3(0, 1, 0);
 const _candCamPos = new THREE.Vector3();
+const _altRayDir = new THREE.Vector3();
 const _lookTarget = new THREE.Vector3();
 const _freeForward = new THREE.Vector3();
 const _freeRight = new THREE.Vector3();
@@ -108,6 +111,9 @@ export class ThirdPersonCameraController {
   private targetZoom = CAMERA_DEFAULT_ZOOM;
   private currentZoom = CAMERA_DEFAULT_ZOOM;
   private resolvedDistance = CAMERA_DEFAULT_ZOOM;
+  private indoorPitchBoost = 0;
+  private occlusionPitchBoost = 0;
+  private pullOutHoldTimer = 0;
 
   private smoothedPivot = new THREE.Vector3(0, 1.25, 0);
   private smoothedLook = new THREE.Vector3(0, 1.25, 0);
@@ -405,6 +411,9 @@ export class ThirdPersonCameraController {
     this.targetZoom = this.settings.zoomDistance;
     this.currentZoom = this.settings.zoomDistance;
     this.resolvedDistance = this.settings.zoomDistance;
+    this.indoorPitchBoost = 0;
+    this.occlusionPitchBoost = 0;
+    this.pullOutHoldTimer = 0;
     this.manualCooldown = 0;
     this.recentering = false;
 
@@ -549,66 +558,134 @@ export class ThirdPersonCameraController {
       );
     }
 
-    // Compute desired spherical camera position first, clamping cleanly above ground
-    const cosPitch = Math.cos(this.currentPitch);
+    // 1. Inside houses (where roofs fade out), gently raise effective pitch so the camera
+    // looks comfortably over the interior walls instead of slamming into the back wall behind the player
+    const desiredIndoorBoost = target.insideHouse
+      ? Math.max(0, INDOOR_MIN_PITCH - this.currentPitch)
+      : 0;
+    this.indoorPitchBoost = instant
+      ? desiredIndoorBoost
+      : THREE.MathUtils.damp(this.indoorPitchBoost, desiredIndoorBoost, 5.2, dt);
+
     const baseDist = target.insideHouse
-      ? Math.min(this.currentZoom, 7.2)
+      ? Math.min(this.currentZoom, 7.4)
       : this.currentZoom;
 
-    _candCamPos.set(
-      this.smoothedPivot.x + Math.sin(this.currentYaw) * cosPitch * baseDist,
-      Math.max(
-        MIN_GROUND_Y,
-        this.smoothedPivot.y + Math.sin(this.currentPitch) * baseDist,
-      ),
-      this.smoothedPivot.z + Math.cos(this.currentYaw) * cosPitch * baseDist,
+    const basePitch = THREE.MathUtils.clamp(
+      this.currentPitch + this.indoorPitchBoost,
+      MIN_PITCH,
+      MAX_PITCH,
     );
 
-    // Raycast along the exact line from character pivot to desired camera position
-    _rayDir.subVectors(_candCamPos, this.smoothedPivot);
-    const desiredDist = Math.max(MIN_SAFE_DIST, _rayDir.length());
-    _rayDir.divideScalar(desiredDist);
+    // 2. Check primary view ray; if a nearby wall/object squeezes the camera tightly,
+    // test a gently lifted angle so the camera peeks smoothly over obstacles instead of cramping close-in
+    const evalRayForPitch = (
+      pitchAngle: number,
+      outDir: THREE.Vector3,
+    ): { desiredDist: number; safeDist: number; centerHitDist: number } => {
+      const cosP = Math.cos(pitchAngle);
+      const sinP = Math.sin(pitchAngle);
+      const candX = this.smoothedPivot.x + Math.sin(this.currentYaw) * cosP * baseDist;
+      const candY = Math.max(MIN_GROUND_Y, this.smoothedPivot.y + sinP * baseDist);
+      const candZ = this.smoothedPivot.z + Math.cos(this.currentYaw) * cosP * baseDist;
 
-    // 1. Multi-ray wall avoidance against solid village buildings, walls & props
-    const safeDist = this.computeWallSafeDistance(
-      this.smoothedPivot,
-      _rayDir,
-      desiredDist,
-    );
+      outDir.set(
+        candX - this.smoothedPivot.x,
+        candY - this.smoothedPivot.y,
+        candZ - this.smoothedPivot.z,
+      );
+      const dDist = Math.max(MIN_SAFE_DIST, outDir.length());
+      outDir.divideScalar(dDist);
 
-    // 2. Asymmetric damping: pull in fast when a wall blocks view, glide out smoothly when clear
-    if (instant || safeDist < this.resolvedDistance) {
-      this.resolvedDistance = instant
-        ? safeDist
-        : THREE.MathUtils.damp(this.resolvedDistance, safeDist, 28, dt);
-      if (this.resolvedDistance > safeDist + 0.05) {
-        this.resolvedDistance = safeDist;
+      const res = this.computeWallSafeDistance(this.smoothedPivot, outDir, dDist);
+      return {
+        desiredDist: dDist,
+        safeDist: res.safeDist,
+        centerHitDist: res.centerHitDist,
+      };
+    };
+
+    const baseEval = evalRayForPitch(basePitch, _rayDir);
+
+    let desiredOcclusionBoost = 0;
+    if (baseEval.safeDist < Math.min(baseEval.desiredDist * 0.78, 5.2)) {
+      let bestDist = baseEval.safeDist;
+      for (const deltaPitch of [0.26, 0.48]) {
+        const probePitch = Math.min(MAX_PITCH, basePitch + deltaPitch);
+        if (probePitch <= basePitch + 0.04) continue;
+        const liftedEval = evalRayForPitch(probePitch, _altRayDir);
+        if (liftedEval.safeDist > bestDist + 0.75) {
+          bestDist = liftedEval.safeDist;
+          desiredOcclusionBoost = probePitch - basePitch;
+        }
       }
-    } else {
+    }
+
+    this.occlusionPitchBoost = instant
+      ? desiredOcclusionBoost
+      : THREE.MathUtils.damp(
+          this.occlusionPitchBoost,
+          desiredOcclusionBoost,
+          desiredOcclusionBoost > this.occlusionPitchBoost ? 6.2 : 3.8,
+          dt,
+        );
+
+    const effectivePitch = THREE.MathUtils.clamp(
+      basePitch + this.occlusionPitchBoost,
+      MIN_PITCH,
+      MAX_PITCH,
+    );
+    const activeEval =
+      this.occlusionPitchBoost > 0.01
+        ? evalRayForPitch(effectivePitch, _rayDir)
+        : baseEval;
+
+    const safeDist = activeEval.safeDist;
+
+    // 3. Smooth asymmetric distance damping (NO violent 1-frame snap when passing near walls/props!)
+    if (instant) {
+      this.resolvedDistance = safeDist;
+      this.pullOutHoldTimer = 0;
+    } else if (safeDist < this.resolvedDistance) {
+      // Smooth, controlled pull-in instead of jarring instant teleport
+      const pullLambda = target.insideHouse ? 8.5 : 10.5;
       this.resolvedDistance = THREE.MathUtils.damp(
         this.resolvedDistance,
         safeDist,
-        6.5,
+        pullLambda,
         dt,
       );
+      this.pullOutHoldTimer = 0.16;
+    } else {
+      // Brief hysteresis hold prevents camera pumping when walking past doorways/corners
+      if (this.pullOutHoldTimer > 0) {
+        this.pullOutHoldTimer = Math.max(0, this.pullOutHoldTimer - dt);
+      } else {
+        this.resolvedDistance = THREE.MathUtils.damp(
+          this.resolvedDistance,
+          safeDist,
+          4.8,
+          dt,
+        );
+      }
     }
 
-    // 3. Position camera strictly on the player's side of any wall (never behind it)
-    const alongRayDist = Math.min(this.resolvedDistance, safeDist);
+    // 4. Position camera smoothly along the view ray with a comfortable minimum clearance
+    const alongRayDist = Math.max(HARD_MIN_RAY_DIST, this.resolvedDistance);
     _candCamPos.copy(this.smoothedPivot).addScaledVector(_rayDir, alongRayDist);
 
-    // 4. If a wall squeezes the camera closer than MIN_SAFE_DIST, lift vertically over
-    // the character's shoulder rather than entering the character or crossing the wall
+    // 5. If squeezed closer than MIN_SAFE_DIST, gently lift vertically over the shoulder
+    // to preserve clear sightlines of the player and surroundings
     if (alongRayDist < MIN_SAFE_DIST) {
       const neededLift = Math.sqrt(
         Math.max(0, MIN_SAFE_DIST * MIN_SAFE_DIST - alongRayDist * alongRayDist),
       );
-      const maxCeilingLift = this.computeWallSafeDistance(
+      const ceilingRes = this.computeWallSafeDistance(
         _candCamPos,
         _upVec,
-        Math.min(1.45, neededLift + 0.25),
+        Math.min(1.55, neededLift + 0.25),
       );
-      _candCamPos.y += Math.min(neededLift, maxCeilingLift);
+      _candCamPos.y += Math.min(neededLift, ceilingRes.safeDist);
     }
 
     // Keep safely above ground plane
@@ -616,12 +693,12 @@ export class ThirdPersonCameraController {
       _candCamPos.y = MIN_GROUND_Y;
     }
 
-    // 5. Final collider push-out guard so camera never slips inside solid building walls
+    // 6. Final floor-aware collider push-out guard so camera never slips inside solid building walls
     this.keepCameraOutsideSolidWalls(_candCamPos);
 
     camera.position.copy(_candCamPos);
 
-    // 6. Look target — raises smoothly when pitching upward so looking at rooftops/sky feels natural
+    // 7. Look target — raises smoothly when pitching upward so looking at rooftops/sky feels natural
     const lookUpLift =
       this.currentPitch < 0 ? Math.abs(this.currentPitch) * 4.4 : 0;
     _lookTarget.set(
@@ -657,18 +734,18 @@ export class ThirdPersonCameraController {
   }
 
   /**
-   * Casts a center ray plus horizontal/vertical whisker rays from the character
-   * toward the desired camera position to prevent walls, roofs, or corners from
-   * blocking the view or clipping the near plane.
+   * Casts a center ray plus 4 whisker rays from the character toward the desired camera position
+   * using consensus filtering: a single grazing whisker clip near a corner/doorframe no longer
+   * yanks the camera in when the center ray and opposite side are clear.
    */
   private computeWallSafeDistance(
     pivot: THREE.Vector3,
     dir: THREE.Vector3,
     desiredDist: number,
-  ): number {
-    if (this.occluders.length === 0) return desiredDist;
-
-    let minDist = desiredDist;
+  ): { safeDist: number; centerHitDist: number } {
+    if (this.occluders.length === 0) {
+      return { safeDist: desiredDist, centerHitDist: desiredDist };
+    }
 
     // Build orthonormal right vector perpendicular to ray direction
     _rightVec.crossVectors(dir, _upVec);
@@ -680,25 +757,30 @@ export class ThirdPersonCameraController {
 
     const probeOffsets: Array<[number, number]> = [
       [0, 0],
-      [0.24, 0],
-      [-0.24, 0],
-      [0, 0.2],
+      [0.2, 0],
+      [-0.2, 0],
+      [0, 0.18],
+      [0, -0.12],
     ];
 
-    _raycaster.near = 0.25;
+    _raycaster.near = 0.35;
     _raycaster.far = desiredDist + WALL_BUFFER;
+
+    const hits: number[] = [];
+    let centerDist = desiredDist;
+    let centerHardDist = desiredDist;
 
     for (let p = 0; p < probeOffsets.length; p++) {
       const [offR, offU] = probeOffsets[p];
-      _rayOrigin
-        .copy(pivot)
-        .addScaledVector(_rightVec, offR);
+      _rayOrigin.copy(pivot).addScaledVector(_rightVec, offR);
       _rayOrigin.y += offU;
 
       _raycaster.set(_rayOrigin, dir);
       _hitBuffer.length = 0;
       _raycaster.intersectObjects(this.occluders, false, _hitBuffer);
 
+      let probeDist = desiredDist;
+      let probeRawDist = desiredDist;
       for (let i = 0; i < _hitBuffer.length; i++) {
         const hit = _hitBuffer[i];
         const mesh = hit.object as THREE.Mesh;
@@ -710,31 +792,47 @@ export class ThirdPersonCameraController {
           continue;
         }
 
-        const candidate = Math.max(0.45, hit.distance - WALL_BUFFER);
-        if (candidate < minDist) {
-          minDist = candidate;
-        }
+        probeRawDist = Math.max(HARD_MIN_RAY_DIST, hit.distance - 0.2);
+        probeDist = Math.max(HARD_MIN_RAY_DIST, hit.distance - WALL_BUFFER);
         break; // _hitBuffer is sorted nearest-first
+      }
+
+      if (p === 0) {
+        centerDist = probeDist;
+        centerHardDist = probeRawDist;
+      } else {
+        hits.push(probeDist);
       }
     }
 
-    return minDist;
+    // Require either the center ray OR at least 2 whisker rays to agree before pulling in,
+    // preventing single-edge corner grazes from snapping the camera close to the player
+    hits.sort((a, b) => a - b);
+    const secondNearestWhisker = hits.length >= 2 ? hits[1] : desiredDist;
+    const safeDist = Math.min(centerDist, secondNearestWhisker);
+
+    return {
+      safeDist,
+      centerHitDist: centerHardDist,
+    };
   }
 
   /**
    * Ensures the camera point never slips inside an opaque wall box collider
-   * (e.g. near tight doorway corners or narrow village alleys).
+   * while respecting vertical floor ranges (`minY`/`topY`) and skipping climbable stairs.
    */
   private keepCameraOutsideSolidWalls(pos: THREE.Vector3): void {
     if (!this.colliders) return;
-    // Only test wall-height cameras against wall colliders (above ~3.4m is above standard walls)
-    if (pos.y > 3.55) return;
 
-    const pad = 0.32;
+    const pad = 0.28;
     for (let i = 0; i < this.colliders.boxes.length; i++) {
       const box = this.colliders.boxes[i];
       if (!box.blocksSight) continue;
-      if (box.climbable && box.topY !== undefined && pos.y >= box.topY) continue;
+      if (box.climbable) continue;
+      if (box.minY !== undefined && pos.y < box.minY - 0.15) continue;
+      const wallTopY = box.topY ?? 3.45;
+      if (pos.y >= wallTopY + 0.1) continue;
+
       if (
         pos.x > box.minX - pad &&
         pos.x < box.maxX + pad &&

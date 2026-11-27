@@ -26,6 +26,7 @@ export interface OnlinePlayerState {
   id: string;
   name: string;
   isHost: boolean;
+  connected?: boolean;
   customization: CharacterCustomization;
   role: TeamRole;
   caught: boolean;
@@ -74,6 +75,9 @@ export interface MultiplayerRoomSnapshot {
   countdownSeconds: number;
   winner: MatchWinner;
   banner: string | null;
+  isLocked?: boolean;
+  hasPasscode?: boolean;
+  serverTime?: number;
   players: OnlinePlayerState[];
 }
 
@@ -96,6 +100,8 @@ export interface ClientToServerMessage {
     | 'identify_auth'
     | 'update_profile'
     | 'select_map'
+    | 'toggle_room_lock'
+    | 'kick_player'
     | 'start_match'
     | 'return_to_lobby'
     | 'leave_room'
@@ -110,6 +116,10 @@ export interface ClientToServerMessage {
   roomCode?: string;
   playerId?: string;
   reconnectToken?: string;
+  clientSessionId?: string;
+  passcode?: string;
+  locked?: boolean;
+  clientSentAt?: number;
   authToken?: string;
   avatarId?: string;
   customization?: CharacterCustomization;
@@ -143,6 +153,9 @@ export interface ServerToClientMessage {
   chatMessage?: ChatMessagePayload;
   playerEmote?: PlayerEmotePayload;
   reportedPlayerId?: string;
+  serverTime?: number;
+  clientSentAt?: number;
+  delta?: boolean;
   positions?: Array<{
     id: string;
     x: number;

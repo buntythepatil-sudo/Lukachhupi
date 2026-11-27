@@ -12,16 +12,25 @@ import { CharacterCustomization } from './types';
 export type MultiplayerConnectionStatus =
   | 'disconnected'
   | 'connecting'
-  | 'connected';
+  | 'connected'
+  | 'reconnecting';
+
+export interface MultiplayerConnectionMeta {
+  rttMs: number | null;
+  reconnectAttempt: number;
+  isOffline: boolean;
+}
 
 export interface MultiplayerClientCallbacks {
   onStatusChange: (status: MultiplayerConnectionStatus) => void;
+  onConnectionMeta?: (meta: MultiplayerConnectionMeta) => void;
   onRoomChange: (
     room: MultiplayerRoomSnapshot | null,
     localPlayerId: string | null,
   ) => void;
   onPositions: (
     positions: NonNullable<ServerToClientMessage['positions']>,
+    serverTime?: number,
   ) => void;
   onMatchEvent: (event: ServerToClientMessage) => void;
   onChatHistory?: (messages: ChatMessagePayload[]) => void;
@@ -31,12 +40,37 @@ export interface MultiplayerClientCallbacks {
   onError: (message: string) => void;
 }
 
+const HEARTBEAT_INTERVAL_MS = 5000;
+const STALE_WATCHDOG_CHECK_MS = 3000;
+const STALE_SOCKET_TIMEOUT_MS = 12500;
+const MAX_BUFFERED_POSITION_BYTES = 32 * 1024;
+
+const DEDUPABLE_QUEUE_TYPES = new Set<ClientToServerMessage['type']>([
+  'create_room',
+  'join_room',
+  'select_map',
+  'update_profile',
+  'toggle_room_lock',
+]);
+
+function createClientSessionId(): string {
+  if (
+    typeof crypto !== 'undefined' &&
+    typeof crypto.randomUUID === 'function'
+  ) {
+    return crypto.randomUUID();
+  }
+  return `sess-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 export class MultiplayerClient {
   private ws: WebSocket | null = null;
   private callbacks: MultiplayerClientCallbacks;
   private status: MultiplayerConnectionStatus = 'disconnected';
   private disposed = false;
 
+  // Kept strictly in memory (never localStorage/sessionStorage)
+  private readonly clientSessionId: string = createClientSessionId();
   private roomCode: string | null = null;
   private localPlayerId: string | null = null;
   private reconnectToken: string | null = null;
@@ -44,10 +78,69 @@ export class MultiplayerClient {
   private pendingQueue: ClientToServerMessage[] = [];
   private reconnectTimer: number | null = null;
   private pingTimer: number | null = null;
+  private watchdogTimer: number | null = null;
   private reconnectAttempts = 0;
+  private lastMessageAt = 0;
+  private rttMs: number | null = null;
+  private isOffline =
+    typeof navigator !== 'undefined' ? navigator.onLine === false : false;
+
+  private readonly handleOnline = (): void => {
+    this.isOffline = false;
+    this.emitMeta();
+    if (this.disposed) return;
+    if (this.roomCode || this.pendingQueue.length > 0) {
+      this.reconnectAttempts = 0;
+      this.ensureConnected();
+    }
+  };
+
+  private readonly handleOffline = (): void => {
+    this.isOffline = true;
+    this.emitMeta();
+    if (this.disposed) return;
+    if (this.roomCode) {
+      this.setStatus('reconnecting');
+    } else {
+      this.setStatus('disconnected');
+    }
+    if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+      try {
+        this.ws.close(4000, 'Browser offline');
+      } catch {
+        // Ignore close errors
+      }
+    }
+  };
+
+  private readonly handleVisibilityChange = (): void => {
+    if (this.disposed || typeof document === 'undefined') return;
+    if (document.visibilityState !== 'visible') return;
+    if (!this.roomCode && this.pendingQueue.length === 0) return;
+
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      if (!this.isOffline) {
+        this.reconnectAttempts = 0;
+        this.ensureConnected();
+      }
+      return;
+    }
+
+    // Probe open socket after returning from background on mobile
+    if (Date.now() - this.lastMessageAt > 6000) {
+      this.sendRaw({ type: 'ping', clientSentAt: Date.now() });
+    }
+  };
 
   constructor(callbacks: MultiplayerClientCallbacks) {
     this.callbacks = callbacks;
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', this.handleOnline);
+      window.addEventListener('offline', this.handleOffline);
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.handleVisibilityChange);
+    }
   }
 
   private getWsUrl(): string {
@@ -61,8 +154,58 @@ export class MultiplayerClient {
     this.callbacks.onStatusChange(next);
   }
 
+  private emitMeta(): void {
+    this.callbacks.onConnectionMeta?.({
+      rttMs: this.rttMs,
+      reconnectAttempt: this.reconnectAttempts,
+      isOffline: this.isOffline,
+    });
+  }
+
+  private clearSocketTimers(): void {
+    if (this.pingTimer !== null) {
+      window.clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+    if (this.watchdogTimer !== null) {
+      window.clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+  }
+
+  private scheduleReconnect(): void {
+    if (this.disposed) return;
+    if (this.reconnectTimer !== null) return;
+    if (!this.roomCode && this.pendingQueue.length === 0) return;
+
+    const baseDelay = Math.min(
+      5000,
+      Math.round(500 * Math.pow(1.6, this.reconnectAttempts)),
+    );
+    const jitter = Math.floor(Math.random() * 260);
+    this.reconnectAttempts += 1;
+    this.emitMeta();
+    this.setStatus(this.roomCode ? 'reconnecting' : 'connecting');
+
+    this.reconnectTimer = window.setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.disposed) return;
+      if (this.isOffline) {
+        this.scheduleReconnect();
+        return;
+      }
+      this.ensureConnected();
+    }, baseDelay + jitter);
+  }
+
   public ensureConnected(): void {
     if (this.disposed) return;
+    if (this.isOffline) {
+      this.setStatus(this.roomCode ? 'reconnecting' : 'disconnected');
+      this.emitMeta();
+      return;
+    }
+
     if (
       this.ws &&
       (this.ws.readyState === WebSocket.OPEN ||
@@ -76,22 +219,40 @@ export class MultiplayerClient {
       this.reconnectTimer = null;
     }
 
-    this.setStatus('connecting');
+    this.setStatus(this.roomCode ? 'reconnecting' : 'connecting');
     const ws = new WebSocket(this.getWsUrl());
     this.ws = ws;
 
     ws.onopen = () => {
       if (this.disposed || this.ws !== ws) return;
       this.reconnectAttempts = 0;
+      this.lastMessageAt = Date.now();
       this.setStatus('connected');
+      this.emitMeta();
 
-      // Start lightweight keepalive ping
-      if (this.pingTimer !== null) window.clearInterval(this.pingTimer);
+      this.clearSocketTimers();
+
+      // Send an immediate RTT probe and maintain 5s heartbeat for mobile stability
+      this.sendRaw({ type: 'ping', clientSentAt: Date.now() });
       this.pingTimer = window.setInterval(() => {
-        this.sendRaw({ type: 'ping' });
-      }, 20000);
+        if (this.ws === ws && ws.readyState === WebSocket.OPEN) {
+          this.sendRaw({ type: 'ping', clientSentAt: Date.now() });
+        }
+      }, HEARTBEAT_INTERVAL_MS);
 
-      // Rejoin active room if recovering from a drop
+      // Watchdog catches silent half-open mobile connections without freezing UI
+      this.watchdogTimer = window.setInterval(() => {
+        if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) return;
+        if (Date.now() - this.lastMessageAt > STALE_SOCKET_TIMEOUT_MS) {
+          try {
+            ws.close(4002, 'Connection timed out');
+          } catch {
+            // Ignore close errors
+          }
+        }
+      }, STALE_WATCHDOG_CHECK_MS);
+
+      // Rejoin active room cleanly if recovering from a drop
       if (this.roomCode && this.localPlayerId && this.reconnectToken) {
         this.sendRaw({
           type: 'rejoin_room',
@@ -101,7 +262,7 @@ export class MultiplayerClient {
         });
       }
 
-      // Flush any queued messages (e.g., create_room / join_room)
+      // Flush queued control messages
       const queued = this.pendingQueue.splice(0, this.pendingQueue.length);
       for (const msg of queued) {
         this.sendRaw(msg);
@@ -110,6 +271,7 @@ export class MultiplayerClient {
 
     ws.onmessage = (event) => {
       if (this.disposed || this.ws !== ws) return;
+      this.lastMessageAt = Date.now();
       let msg: ServerToClientMessage;
       try {
         msg = JSON.parse(String(event.data)) as ServerToClientMessage;
@@ -120,27 +282,28 @@ export class MultiplayerClient {
     };
 
     ws.onerror = () => {
-      // onclose handles cleanup & retry
+      // onclose handles cleanup and backoff retry
     };
 
-    ws.onclose = () => {
+    ws.onclose = (closeEvent) => {
       if (this.ws === ws) {
         this.ws = null;
-      }
-      if (this.pingTimer !== null) {
-        window.clearInterval(this.pingTimer);
-        this.pingTimer = null;
+        this.clearSocketTimers();
       }
       if (this.disposed) return;
-      this.setStatus('disconnected');
 
-      // Auto-reconnect whenever the user is in an active room or has pending commands
+      // 4001 indicates this tab was replaced by a newer reconnected socket
+      if (closeEvent.code === 4001) {
+        this.setStatus('disconnected');
+        return;
+      }
+
       if (this.roomCode || this.pendingQueue.length > 0) {
-        const delay = Math.min(5000, 600 * Math.pow(1.6, this.reconnectAttempts));
-        this.reconnectAttempts += 1;
-        this.reconnectTimer = window.setTimeout(() => {
-          this.ensureConnected();
-        }, delay);
+        this.scheduleReconnect();
+      } else {
+        this.rttMs = null;
+        this.emitMeta();
+        this.setStatus('disconnected');
       }
     };
   }
@@ -170,7 +333,7 @@ export class MultiplayerClient {
       }
       case 'player_positions': {
         if (msg.positions) {
-          this.callbacks.onPositions(msg.positions);
+          this.callbacks.onPositions(msg.positions, msg.serverTime);
         }
         break;
       }
@@ -200,16 +363,39 @@ export class MultiplayerClient {
         this.roomCode = null;
         this.localPlayerId = null;
         this.reconnectToken = null;
+        this.pendingQueue = [];
         this.callbacks.onRoomChange(null, null);
         break;
       }
       case 'error': {
         if (msg.message) {
+          if (
+            this.roomCode &&
+            /no longer exists|session expired|removed from the room/i.test(
+              msg.message,
+            )
+          ) {
+            this.roomCode = null;
+            this.localPlayerId = null;
+            this.reconnectToken = null;
+            this.pendingQueue = [];
+            this.callbacks.onRoomChange(null, null);
+          }
           this.callbacks.onError(msg.message);
         }
         break;
       }
-      case 'pong':
+      case 'pong': {
+        if (typeof msg.clientSentAt === 'number') {
+          const sampleRtt = Math.max(0, Math.min(3000, Date.now() - msg.clientSentAt));
+          this.rttMs =
+            this.rttMs === null
+              ? sampleRtt
+              : Math.round(this.rttMs * 0.72 + sampleRtt * 0.28);
+          this.emitMeta();
+        }
+        break;
+      }
       default:
         break;
     }
@@ -217,16 +403,24 @@ export class MultiplayerClient {
 
   private sendRaw(msg: ClientToServerMessage): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
+      try {
+        this.ws.send(JSON.stringify(msg));
+      } catch {
+        // Transient socket error handled by close/watchdog
+      }
     }
   }
 
   private sendOrQueue(msg: ClientToServerMessage): void {
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
-      this.ws.send(JSON.stringify(msg));
+      this.sendRaw(msg);
     } else {
-      // Keep only latest non-position action queued while connecting
       if (msg.type !== 'player_state') {
+        if (DEDUPABLE_QUEUE_TYPES.has(msg.type)) {
+          this.pendingQueue = this.pendingQueue.filter(
+            (queued) => queued.type !== msg.type,
+          );
+        }
         this.pendingQueue.push(msg);
       }
       this.ensureConnected();
@@ -239,6 +433,7 @@ export class MultiplayerClient {
     levelId: number,
     authToken?: string,
     avatarId?: string,
+    passcode?: string,
   ): void {
     this.sendOrQueue({
       type: 'create_room',
@@ -247,6 +442,8 @@ export class MultiplayerClient {
       levelId,
       authToken,
       avatarId,
+      clientSessionId: this.clientSessionId,
+      passcode: passcode?.trim() || undefined,
     });
   }
 
@@ -255,6 +452,7 @@ export class MultiplayerClient {
     customization: CharacterCustomization,
     authToken?: string,
     avatarId?: string,
+    passcode?: string,
   ): void {
     this.sendOrQueue({
       type: 'join_room',
@@ -262,6 +460,24 @@ export class MultiplayerClient {
       customization,
       authToken,
       avatarId,
+      clientSessionId: this.clientSessionId,
+      passcode: passcode?.trim() || undefined,
+    });
+  }
+
+  public toggleRoomLock(locked: boolean): void {
+    if (!this.roomCode) return;
+    this.sendOrQueue({
+      type: 'toggle_room_lock',
+      locked,
+    });
+  }
+
+  public kickPlayer(targetPlayerId: string): void {
+    if (!this.roomCode || !targetPlayerId) return;
+    this.sendRaw({
+      type: 'kick_player',
+      targetPlayerId,
     });
   }
 
@@ -315,11 +531,18 @@ export class MultiplayerClient {
     this.localPlayerId = null;
     this.reconnectToken = null;
     this.pendingQueue = [];
+    if (this.reconnectTimer !== null) {
+      window.clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this.callbacks.onRoomChange(null, null);
   }
 
   public sendPlayerState(state: PlayerTransformPayload): void {
     if (!this.roomCode) return;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    // Backpressure guard: drop redundant movement frames on congested mobile links
+    if (this.ws.bufferedAmount > MAX_BUFFERED_POSITION_BYTES) return;
     this.sendRaw({ type: 'player_state', state });
   }
 
@@ -366,14 +589,21 @@ export class MultiplayerClient {
 
   public dispose(): void {
     this.disposed = true;
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('online', this.handleOnline);
+      window.removeEventListener('offline', this.handleOffline);
+    }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener(
+        'visibilitychange',
+        this.handleVisibilityChange,
+      );
+    }
     if (this.reconnectTimer !== null) {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    if (this.pingTimer !== null) {
-      window.clearInterval(this.pingTimer);
-      this.pingTimer = null;
-    }
+    this.clearSocketTimers();
     if (this.ws) {
       try {
         this.ws.close();

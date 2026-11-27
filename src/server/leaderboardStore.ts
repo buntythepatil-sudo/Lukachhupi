@@ -71,7 +71,7 @@ interface ActiveSoloSession {
 const DATA_DIR = path.resolve(__dirname, '..', '..', '.data');
 const STORE_PATH = path.resolve(DATA_DIR, 'verified-leaderboard.json');
 
-const TOTAL_LEVELS = 8;
+const TOTAL_LEVELS = 15;
 const TOP_LIMIT = 100;
 
 // Realistic minimum server-elapsed durations matching engine.ts (12s headstart + 180s match timer)

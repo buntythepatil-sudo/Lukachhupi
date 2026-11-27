@@ -55,15 +55,15 @@
         },
         "unlockedLevel": {
           "type": "integer",
-          "description": "Highest unlocked map level from 1 to 8."
+          "description": "Highest unlocked map level from 1 to 15."
         },
         "completedLevels": {
           "type": "array",
-          "description": "List of completed map IDs (integers 1 through 8)."
+          "description": "List of completed map IDs (integers 1 through 15)."
         },
         "levelStars": {
           "type": "object",
-          "description": "Map of level ID strings ('1' through '8') to best earned star rating (1 to 3)."
+          "description": "Map of level ID strings ('1' through '15') to best earned star rating (1 to 3)."
         },
         "createdAt": {
           "type": "string",
@@ -421,7 +421,7 @@
         },
         "levelId": {
           "type": "integer",
-          "description": "Map level ID selected for the room (1 to 8)."
+          "description": "Map level ID selected for the room (1 to 15)."
         },
         "status": {
           "type": "string",
@@ -549,7 +549,7 @@
         },
         "levelId": {
           "type": "integer",
-          "description": "Selected map level ID from 1 to 8."
+          "description": "Selected map level ID from 1 to 15."
         },
         "phase": {
           "type": "string",
@@ -724,7 +724,7 @@
         },
         "completedLevels": {
           "type": "array",
-          "description": "List of completed map IDs (integers 1 through 8)."
+          "description": "List of completed map IDs (integers 1 through 15)."
         },
         "updatedAt": {
           "type": "string",
@@ -763,7 +763,7 @@
         },
         "levelId": {
           "type": "integer",
-          "description": "Map level ID from 1 to 8."
+          "description": "Map level ID from 1 to 15."
         },
         "playerRole": {
           "type": "string",

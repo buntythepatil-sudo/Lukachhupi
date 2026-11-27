@@ -42,12 +42,15 @@ import {
   Smile,
   Star,
   Trophy,
+  Unlock,
   User,
   UserPlus,
   Users,
   Video,
   Volume2,
   VolumeX,
+  Wifi,
+  WifiOff,
   X,
 } from 'lucide-react';
 import { CircularMinimap } from './components/CircularMinimap';
@@ -93,6 +96,7 @@ import {
 import { ChhupanChhupaiEngine } from './game/engine';
 import {
   getLevelConfig,
+  isLevelUnlocked,
   LEVEL_CONFIGS,
   TOTAL_LEVELS,
 } from './game/levels';
@@ -297,6 +301,9 @@ export default function App() {
 
   const [hud, setHud] = useState<HudSnapshot>(INITIAL_HUD);
   const [chosenRole, setChosenRole] = useState<TeamRole>('hider');
+  const [selectedLevelId, setSelectedLevelId] = useState<number>(
+    INITIAL_HUD.currentLevelId,
+  );
   const [customization, setCustomization] = useState<CharacterCustomization>(
     INITIAL_CUSTOMIZATION,
   );
@@ -373,6 +380,10 @@ export default function App() {
   // Real-time online multiplayer room state
   const [mpStatus, setMpStatus] =
     useState<MultiplayerConnectionStatus>('disconnected');
+  const [mpRttMs, setMpRttMs] = useState<number | null>(null);
+  const [mpOffline, setMpOffline] = useState<boolean>(
+    typeof navigator !== 'undefined' ? navigator.onLine === false : false,
+  );
   const [onlineRoom, setOnlineRoom] = useState<MultiplayerRoomSnapshot | null>(
     null,
   );
@@ -383,6 +394,8 @@ export default function App() {
     Record<string, PlayerLiveStatus>
   >({});
   const [joinCodeInput, setJoinCodeInput] = useState('');
+  const [createRoomPin, setCreateRoomPin] = useState('');
+  const [joinRoomPin, setJoinRoomPin] = useState('');
   const [roomError, setRoomError] = useState<string | null>(null);
   const [copiedNotice, setCopiedNotice] = useState<'code' | 'link' | null>(
     null,
@@ -901,12 +914,18 @@ export default function App() {
 
     const engine = new ChhupanChhupaiEngine(mount, (snapshot) => {
       setHud(snapshot);
+      setSelectedLevelId(snapshot.currentLevelId);
     });
     engineRef.current = engine;
 
     const mpClient = new MultiplayerClient({
       onStatusChange: (status) => {
         setMpStatus(status);
+      },
+      onConnectionMeta: (meta) => {
+        setMpRttMs(meta.rttMs);
+        setMpOffline(meta.isOffline);
+        engine.setNetworkRtt(meta.rttMs);
       },
       onRoomChange: (room, playerId) => {
         setRoomError(null);
@@ -940,8 +959,8 @@ export default function App() {
           engine.exitOnlineMode();
         }
       },
-      onPositions: (positions) => {
-        engine.applyOnlinePositions(positions);
+      onPositions: (positions, serverTime) => {
+        engine.applyOnlinePositions(positions, serverTime);
         let changed = false;
         const next = { ...liveStatusRef.current };
         for (const p of positions) {
@@ -1408,6 +1427,8 @@ export default function App() {
   };
 
   const handleSelectLevel = (levelId: number) => {
+    if (!isLevelUnlocked(levelId, hud.unlockedLevel)) return;
+    setSelectedLevelId(levelId);
     engineRef.current?.selectLevel(levelId);
   };
 
@@ -1429,7 +1450,10 @@ export default function App() {
     setShowScoreboard(false);
     setShowCameraSettings(false);
     setShowAudioSettings(false);
-    beginVerifiedSoloSession(hud.currentLevelId, chosenRole);
+    if (hud.currentLevelId !== selectedLevelId) {
+      engineRef.current?.selectLevel(selectedLevelId);
+    }
+    beginVerifiedSoloSession(selectedLevelId, chosenRole);
     engineRef.current?.startMatch(chosenRole, customization);
   };
 
@@ -1594,7 +1618,14 @@ export default function App() {
 
   const handleCreateRoom = () => {
     setRoomError(null);
-    const levelToUse = Math.min(hud.currentLevelId, hud.unlockedLevel);
+    const levelToUse = isLevelUnlocked(hud.currentLevelId, hud.unlockedLevel)
+      ? hud.currentLevelId
+      : Math.min(hud.currentLevelId, hud.unlockedLevel);
+    const cleanedPin = createRoomPin.trim();
+    if (cleanedPin.length > 0 && cleanedPin.length < 4) {
+      setRoomError('Optional room PIN must be 4 to 12 characters.');
+      return;
+    }
     void getVerifiedAuthToken().then((authToken) => {
       mpClientRef.current?.createRoom(
         customization,
@@ -1602,6 +1633,7 @@ export default function App() {
         levelToUse,
         authToken,
         profileRef.current.avatarId,
+        cleanedPin || undefined,
       );
     });
   };
@@ -1614,19 +1646,32 @@ export default function App() {
       return;
     }
     setRoomError(null);
+    const cleanedPin = joinRoomPin.trim();
     void getVerifiedAuthToken().then((authToken) => {
       mpClientRef.current?.joinRoom(
         cleaned,
         customization,
         authToken,
         profileRef.current.avatarId,
+        cleanedPin || undefined,
       );
     });
   };
 
-  const handleHostSelectMap = (levelId: number) => {
-    if (levelId > hud.unlockedLevel) return;
+  const handleToggleRoomLock = () => {
+    if (!onlineRoom || !localOnlinePlayerId || onlineRoom.hostId !== localOnlinePlayerId) {
+      return;
+    }
     setRoomError(null);
+    mpClientRef.current?.toggleRoomLock(!onlineRoom.isLocked);
+  };
+
+  const handleHostSelectMap = (levelId: number) => {
+    if (!isLevelUnlocked(levelId, hud.unlockedLevel)) return;
+    setRoomError(null);
+    engineRef.current?.playUiClick();
+    setOnlineRoom((prev) => (prev ? { ...prev, levelId } : prev));
+    engineRef.current?.previewOnlineLobbyMap(levelId);
     mpClientRef.current?.selectMap(levelId, hud.unlockedLevel);
   };
 
@@ -1745,7 +1790,8 @@ export default function App() {
   const selectedPreset = getPresetById(customization.presetId);
   const displayChosenName =
     customization.name.trim() || selectedPreset.defaultName;
-  const activeLevel = getLevelConfig(hud.currentLevelId);
+  const effectiveLevelId = hud.phase === 'start' ? selectedLevelId : hud.currentLevelId;
+  const activeLevel = getLevelConfig(effectiveLevelId);
   const nextLevelConfig =
     hud.currentLevelId < TOTAL_LEVELS
       ? getLevelConfig(hud.currentLevelId + 1)
@@ -1774,7 +1820,7 @@ export default function App() {
     !isInOnlineRoom &&
     playerWon &&
     nextLevelConfig !== null &&
-    nextLevelConfig.id <= hud.unlockedLevel;
+    isLevelUnlocked(nextLevelConfig.id, hud.unlockedLevel);
 
   return (
     <div className="relative w-full h-full overflow-hidden bg-[#1b140f]">
@@ -2084,6 +2130,22 @@ export default function App() {
             )}
           </div>
 
+          {/* Connection status banner during live online match when unstable or offline */}
+          {isInOnlineRoom && (mpStatus !== 'connected' || mpOffline) && (
+            <div
+              role="status"
+              aria-live="polite"
+              className="pointer-events-none absolute top-11 sm:top-14 left-1/2 -translate-x-1/2 z-20 inline-flex items-center gap-1.5 rounded-lg border border-amber-300/45 bg-[#1d140e]/92 px-2.5 py-1 text-[11px] font-semibold text-amber-200 shadow-lg whitespace-nowrap"
+            >
+              <WifiOff className="w-3.5 h-3.5 text-amber-300 shrink-0" aria-hidden="true" />
+              <span>
+                {mpOffline
+                  ? 'Internet offline — waiting to reconnect...'
+                  : 'Reconnecting to match...'}
+              </span>
+            </div>
+          )}
+
           {/* Live Online Players Name & Status Panel (visible during multiplayer matches) */}
           {isInOnlineRoom &&
             showOnlineRoster &&
@@ -2118,11 +2180,13 @@ export default function App() {
                         <div className="flex items-center gap-1.5 min-w-0">
                           <span
                             className={`w-2 h-2 rounded-full shrink-0 ${
-                              p.role === 'seeker'
-                                ? 'bg-amber-400'
-                                : p.caught
-                                  ? 'bg-rose-400'
-                                  : 'bg-emerald-400'
+                              p.connected === false
+                                ? 'bg-amber-300 animate-pulse'
+                                : p.role === 'seeker'
+                                  ? 'bg-amber-400'
+                                  : p.caught
+                                    ? 'bg-rose-400'
+                                    : 'bg-emerald-400'
                             }`}
                           />
                           <span className="truncate text-amber-50/95 font-medium">
@@ -2132,11 +2196,17 @@ export default function App() {
                         </div>
                         <div className="flex items-center gap-1 shrink-0">
                           <span
-                            className={`text-[11px] font-semibold ${badge.toneClass}`}
+                            className={`text-[11px] font-semibold ${
+                              p.connected === false
+                                ? 'text-amber-300'
+                                : badge.toneClass
+                            }`}
                           >
-                            {p.role === 'seeker'
-                              ? `Seeker · ${badge.label}`
-                              : badge.label}
+                            {p.connected === false
+                              ? 'Reconnecting'
+                              : p.role === 'seeker'
+                                ? `Seeker · ${badge.label}`
+                                : badge.label}
                           </span>
                           {!isMe && (
                             <>
@@ -3444,7 +3514,10 @@ export default function App() {
               </>
             ) : (
               /* SUB-SCREENS CONNECTED FROM MAIN MENU (Levels, Character, Multiplayer, Settings, Profile, Friends, Leaderboard) */
-              <div className="pointer-events-auto flex flex-col flex-1 min-h-0 overflow-hidden rounded-2xl border border-amber-200/25 bg-[#1e140e]/92 px-3 py-2.5 sm:px-4 sm:py-3.5 shadow-2xl">
+              <div
+                onPointerDown={(e) => e.stopPropagation()}
+                className="pointer-events-auto flex flex-col flex-1 min-h-0 overflow-hidden rounded-2xl border border-amber-200/25 bg-[#1e140e]/92 px-3 py-2.5 sm:px-4 sm:py-3.5 shadow-2xl"
+              >
                 {/* Sub-Screen Header with Back & Sound Toggle */}
                 <div className="flex items-center justify-between gap-2 pb-2 sm:pb-2.5 border-b border-amber-100/12 shrink-0">
                   <button
@@ -3454,7 +3527,7 @@ export default function App() {
                         startScreen === 'privacy' ? privacyReturnScreen : 'menu',
                       )
                     }
-                    className="inline-flex items-center gap-1 min-h-[36px] rounded-lg border border-amber-100/20 bg-[#150e0a]/90 hover:bg-[#2a1c14] px-2.5 py-1 text-xs font-bold text-amber-100 whitespace-nowrap shrink-0 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                    className="inline-flex items-center gap-1 min-h-[36px] rounded-lg border border-amber-100/20 bg-[#150e0a]/90 hover:bg-[#2a1c14] px-2.5 py-1 text-xs font-bold text-amber-100 whitespace-nowrap shrink-0 transition-colors cursor-pointer touch-manipulation focus-visible:outline-2 focus-visible:outline-amber-300"
                   >
                     <ArrowLeft className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
                     <span>
@@ -3485,7 +3558,7 @@ export default function App() {
                     onClick={handleToggleMute}
                     title={hud.audioSettings.muted ? 'Unmute audio' : 'Mute audio'}
                     aria-label={hud.audioSettings.muted ? 'Unmute audio' : 'Mute audio'}
-                    className={`inline-flex items-center justify-center min-w-[36px] min-h-[36px] rounded-lg border shrink-0 transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                    className={`inline-flex items-center justify-center min-w-[36px] min-h-[36px] rounded-lg border shrink-0 transition-colors cursor-pointer touch-manipulation focus-visible:outline-2 focus-visible:outline-amber-300 ${
                       hud.audioSettings.muted
                         ? 'bg-amber-500/25 text-amber-200 border-amber-300'
                         : 'bg-[#150e0a]/80 text-amber-100/85 border-amber-100/15 hover:border-amber-200/35'
@@ -3500,7 +3573,7 @@ export default function App() {
                 </div>
 
                 {/* Scroll-safe Body */}
-                <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-0.5">
+                <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden pr-0.5 touch-pan-y overscroll-contain">
                   {/* SUB-SCREEN 0: Player Profile, Statistics & Cloud Sync */}
                   {startScreen === 'profile' && (
                     <PlayerProfilePanel
@@ -3593,8 +3666,8 @@ export default function App() {
 
                   <div className="grid grid-cols-2 gap-1.5 sm:gap-2">
                     {LEVEL_CONFIGS.map((lvl) => {
-                      const isUnlocked = lvl.id <= hud.unlockedLevel;
-                      const isSelected = lvl.id === hud.currentLevelId;
+                      const isUnlocked = isLevelUnlocked(lvl.id, hud.unlockedLevel);
+                      const isSelected = lvl.id === selectedLevelId;
                       const lvlStars =
                         playerProfile.levelStars[String(lvl.id)] ?? 0;
                       return (
@@ -3604,17 +3677,28 @@ export default function App() {
                           disabled={!isUnlocked}
                           onClick={() => handleSelectLevel(lvl.id)}
                           aria-pressed={isSelected}
-                          className={`flex flex-col items-start min-w-0 rounded-lg sm:rounded-xl border px-2 py-1.5 sm:px-2.5 sm:py-2 text-left transition-colors focus-visible:outline-2 focus-visible:outline-amber-300 ${
+                          className={`flex flex-col items-start min-w-0 rounded-lg sm:rounded-xl border px-2 py-1.5 sm:px-2.5 sm:py-2 text-left transition-all touch-manipulation select-none active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-amber-300 ${
                             isSelected
-                              ? 'bg-amber-500/22 border-amber-300 text-amber-50 cursor-pointer'
+                              ? 'bg-amber-500/26 border-amber-300 ring-1 ring-amber-300/75 text-amber-50 shadow-[0_0_12px_rgba(251,191,36,0.18)] cursor-pointer'
                               : isUnlocked
                                 ? 'bg-[#150e0a]/85 border-amber-100/15 text-amber-100/90 hover:border-amber-200/40 cursor-pointer'
                                 : 'bg-[#120c08]/70 border-amber-100/10 text-amber-100/45 cursor-not-allowed'
                           }`}
                         >
                           <div className="flex items-center justify-between w-full gap-1 min-w-0">
-                            <span className="text-[9.5px] sm:text-[11px] font-bold tracking-wide text-amber-300 whitespace-nowrap">
-                              L{lvl.id}
+                            <span className="inline-flex items-center gap-1 text-[9.5px] sm:text-[11px] font-bold tracking-wide text-amber-300 whitespace-nowrap">
+                              {isSelected && (
+                                <Check
+                                  className="w-3 h-3 text-amber-200 shrink-0"
+                                  aria-hidden="true"
+                                />
+                              )}
+                              <span>L{lvl.id}</span>
+                              {lvl.alwaysUnlocked && (
+                                <span className="rounded bg-amber-400/20 px-1 py-0.5 text-[8px] font-bold uppercase tracking-wider text-amber-200">
+                                  Pixar 3D
+                                </span>
+                              )}
                             </span>
                             {isUnlocked ? (
                               <span className="inline-flex items-center gap-0.5">
@@ -3928,10 +4012,30 @@ export default function App() {
                         <p className="mt-1 text-[10px] sm:text-[11px] text-amber-100/70 leading-snug">
                           Create a private room code to play live with friends across devices. Seeker rotates every round.
                         </p>
+                        <div className="mt-2 flex items-center gap-1.5">
+                          <input
+                            id="create-room-pin-input"
+                            type="password"
+                            inputMode="text"
+                            value={createRoomPin}
+                            onChange={(e) =>
+                              setCreateRoomPin(
+                                e.target.value
+                                  .replace(/[^A-Za-z0-9]/g, '')
+                                  .slice(0, 12),
+                              )
+                            }
+                            placeholder="Optional PIN (4-12 chars)"
+                            maxLength={12}
+                            autoComplete="off"
+                            aria-label="Optional private room PIN"
+                            className="flex-1 min-w-0 min-h-[34px] rounded-lg border border-amber-100/15 bg-[#110b08] px-2.5 py-1 text-[11px] text-amber-50 placeholder:text-amber-100/40 focus:border-amber-300 focus:outline-none select-text"
+                          />
+                        </div>
                         <button
                           type="button"
                           onClick={handleCreateRoom}
-                          className="mt-2 sm:mt-3 w-full inline-flex items-center justify-center gap-1.5 min-h-[38px] sm:min-h-[44px] rounded-xl bg-[#d96b27] hover:bg-[#e57731] active:scale-[0.98] px-3 py-2 text-xs sm:text-sm font-bold text-white transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
+                          className="mt-2 w-full inline-flex items-center justify-center gap-1.5 min-h-[38px] sm:min-h-[44px] rounded-xl bg-[#d96b27] hover:bg-[#e57731] active:scale-[0.98] px-3 py-2 text-xs sm:text-sm font-bold text-white transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-amber-300"
                         >
                           <Users className="w-3.5 h-3.5 sm:w-4 sm:h-4 shrink-0" aria-hidden="true" />
                           <span className="truncate">Create Room ({displayChosenName})</span>
@@ -3976,23 +4080,85 @@ export default function App() {
                             Join Room
                           </button>
                         </div>
+                        <div className="mt-1.5">
+                          <input
+                            id="join-room-pin-input"
+                            type="password"
+                            inputMode="text"
+                            value={joinRoomPin}
+                            onChange={(e) =>
+                              setJoinRoomPin(
+                                e.target.value
+                                  .replace(/[^A-Za-z0-9]/g, '')
+                                  .slice(0, 12),
+                              )
+                            }
+                            placeholder="Room PIN (if host set one)"
+                            maxLength={12}
+                            autoComplete="off"
+                            aria-label="Room PIN if required"
+                            className="w-full min-h-[32px] rounded-lg border border-amber-100/15 bg-[#110b08] px-2.5 py-1 text-[11px] text-amber-50 placeholder:text-amber-100/40 focus:border-amber-300 focus:outline-none select-text"
+                          />
+                        </div>
                       </form>
                     </>
                   ) : (
                     <>
-                      {/* Active Waiting Lobby Header with Room Code & Copy Controls */}
+                      {/* Active Waiting Lobby Header with Room Code, Privacy & Connection Status */}
                       <div className="rounded-xl border border-amber-300/35 bg-[#150e0a]/90 p-2.5 sm:p-3">
                         <div className="flex items-center justify-between gap-2">
                           <div className="min-w-0">
-                            <div className="text-[10px] font-semibold text-amber-200/80">
-                              Room Code
+                            <div className="flex items-center gap-1.5 text-[10px] font-semibold text-amber-200/80">
+                              <span>Room Code</span>
+                              {onlineRoom.isLocked && (
+                                <span className="inline-flex items-center gap-0.5 text-[9.5px] font-bold text-rose-300">
+                                  <Lock className="w-2.5 h-2.5" aria-hidden="true" />
+                                  Locked
+                                </span>
+                              )}
+                              {onlineRoom.hasPasscode && (
+                                <span className="text-[9.5px] font-bold text-amber-300">
+                                  PIN
+                                </span>
+                              )}
                             </div>
                             <div className="font-mono text-lg sm:text-2xl font-extrabold tracking-[0.18em] text-amber-300 leading-tight">
                               {onlineRoom.code}
                             </div>
                           </div>
 
-                          <div className="flex items-center gap-1.5 shrink-0">
+                          <div className="flex items-center gap-1 shrink-0">
+                            {isOnlineHost && (
+                              <button
+                                type="button"
+                                onClick={handleToggleRoomLock}
+                                title={
+                                  onlineRoom.isLocked
+                                    ? 'Unlock room so friends can join'
+                                    : 'Lock room to block new joins'
+                                }
+                                aria-label={
+                                  onlineRoom.isLocked
+                                    ? 'Unlock room'
+                                    : 'Lock room'
+                                }
+                                className={`inline-flex items-center gap-1 min-h-[34px] sm:min-h-[38px] rounded-lg border px-2 py-1 text-[11px] font-semibold transition-colors cursor-pointer ${
+                                  onlineRoom.isLocked
+                                    ? 'border-rose-400/45 bg-rose-950/60 text-rose-200 hover:bg-rose-900/60'
+                                    : 'border-amber-100/20 bg-[#231811] hover:bg-[#312118] text-amber-50'
+                                }`}
+                              >
+                                {onlineRoom.isLocked ? (
+                                  <Lock className="w-3 h-3" aria-hidden="true" />
+                                ) : (
+                                  <Unlock className="w-3 h-3" aria-hidden="true" />
+                                )}
+                                <span className="hidden sm:inline">
+                                  {onlineRoom.isLocked ? 'Locked' : 'Lock'}
+                                </span>
+                              </button>
+                            )}
+
                             <button
                               type="button"
                               onClick={() => handleCopyRoomText('code')}
@@ -4021,11 +4187,33 @@ export default function App() {
                           </div>
                         </div>
 
-                        {mpStatus === 'connecting' && (
-                          <div className="mt-1 text-[10px] text-amber-300">
-                            Reconnecting to room...
-                          </div>
-                        )}
+                        <div className="mt-1.5 flex items-center gap-1.5 text-[10px] font-medium">
+                          {mpOffline ? (
+                            <>
+                              <WifiOff className="w-3 h-3 text-rose-300 shrink-0" aria-hidden="true" />
+                              <span className="text-rose-200">
+                                Internet offline — waiting to reconnect...
+                              </span>
+                            </>
+                          ) : mpStatus === 'connected' ? (
+                            <>
+                              <Wifi className="w-3 h-3 text-emerald-300 shrink-0" aria-hidden="true" />
+                              <span className="text-emerald-200/90">
+                                Connected
+                                {mpRttMs !== null ? ` · ${mpRttMs}ms` : ''}
+                              </span>
+                            </>
+                          ) : (
+                            <>
+                              <WifiOff className="w-3 h-3 text-amber-300 animate-pulse shrink-0" aria-hidden="true" />
+                              <span className="text-amber-300">
+                                {mpStatus === 'reconnecting'
+                                  ? 'Reconnecting to room...'
+                                  : 'Connecting to room...'}
+                              </span>
+                            </>
+                          )}
+                        </div>
                       </div>
 
                       {/* Quick Invite Friends Strip inside Waiting Lobby */}
@@ -4123,6 +4311,11 @@ export default function App() {
                                     <span className="inline-flex items-center gap-0.5 text-[9.5px] font-bold text-amber-300 shrink-0">
                                       <Crown className="w-2.5 h-2.5" aria-hidden="true" />
                                       Host
+                                    </span>
+                                  )}
+                                  {p.connected === false && (
+                                    <span className="text-[9.5px] font-semibold text-amber-300 animate-pulse shrink-0">
+                                      Reconnecting
                                     </span>
                                   )}
                                 </div>
@@ -4224,9 +4417,9 @@ export default function App() {
                         </div>
 
                         {isOnlineHost ? (
-                          <div className="grid grid-cols-2 gap-1 max-h-[82px] sm:max-h-[116px] overflow-y-auto pr-0.5">
+                          <div className="grid grid-cols-2 gap-1 max-h-[82px] sm:max-h-[116px] overflow-y-auto pr-0.5 touch-pan-y overscroll-contain">
                             {LEVEL_CONFIGS.map((lvl) => {
-                              const unlocked = lvl.id <= hud.unlockedLevel;
+                              const unlocked = isLevelUnlocked(lvl.id, hud.unlockedLevel);
                               const selected = lvl.id === onlineRoom.levelId;
                               return (
                                 <button
@@ -4234,16 +4427,22 @@ export default function App() {
                                   type="button"
                                   disabled={!unlocked}
                                   onClick={() => handleHostSelectMap(lvl.id)}
-                                  className={`flex items-center justify-between gap-1 min-w-0 rounded-md border px-2 py-1 text-left text-[10px] sm:text-[11px] font-semibold transition-colors ${
+                                  aria-pressed={selected}
+                                  className={`flex items-center justify-between gap-1 min-w-0 rounded-md border px-2 py-1 text-left text-[10px] sm:text-[11px] font-semibold transition-all touch-manipulation select-none active:scale-[0.98] ${
                                     selected
-                                      ? 'bg-amber-500/25 border-amber-300 text-amber-50 cursor-pointer'
+                                      ? 'bg-amber-500/28 border-amber-300 ring-1 ring-amber-300/60 text-amber-50 cursor-pointer'
                                       : unlocked
                                         ? 'bg-[#1c130d] border-amber-100/15 text-amber-100/85 hover:border-amber-200/40 cursor-pointer'
                                         : 'bg-[#120c08] border-amber-100/8 text-amber-100/40 cursor-not-allowed'
                                   }`}
                                 >
-                                  <span className="truncate">
-                                    {lvl.id}. {lvl.shortName}
+                                  <span className="inline-flex items-center gap-1 truncate">
+                                    {selected && (
+                                      <Check className="w-2.5 h-2.5 text-amber-200 shrink-0" aria-hidden="true" />
+                                    )}
+                                    <span className="truncate">
+                                      {lvl.id}. {lvl.shortName}
+                                    </span>
                                   </span>
                                   {!unlocked && (
                                     <Lock className="w-2.5 h-2.5 shrink-0" aria-hidden="true" />

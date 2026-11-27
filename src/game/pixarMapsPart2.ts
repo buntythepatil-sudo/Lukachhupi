@@ -96,12 +96,12 @@ export function buildPalaceGardensMap(textures: VillageTextureSet): VillageBuild
     clearcoat: 0.95,
   });
   const marbleMat = new THREE.MeshStandardMaterial({
-    map: textures.wallCream,
+    map: textures.mudWall,
     color: 0xf5efe6,
     roughness: 0.52,
   });
   const roseStoneMat = new THREE.MeshStandardMaterial({
-    map: textures.wallOchre,
+    map: textures.mudWallOchre,
     color: 0xd98a7c,
     roughness: 0.68,
   });
@@ -328,7 +328,7 @@ export function buildGrandMelaMap(textures: VillageTextureSet): VillageBuildResu
   // HERO SET-PIECE 2: Spinning 8-Horse Merry-Go-Round Carousel (East Center at 16.5, 0)!
   anim.addCarousel(ctx.group, 16.5, 0);
   ctx.circles.push({ x: 16.5, z: 0, radius: 4.5, blocksSight: true });
-  ctx.buildings.push({ x: 16.5, z: 0, width: 9.0, depth: 9.0, rotY: 0, kind: 'shop' });
+  ctx.buildings.push({ x: 16.5, z: 0, width: 9.0, depth: 9.0, rotY: 0, kind: 'market' });
   ctx.hidingSpots.push({ x: 22.0, z: 0, label: 'Behind the Spinning Carousel', kind: 'gully' });
 
   // 6 Enterable Colorful Striped Carnival Pavilions & Mela Booths
@@ -362,13 +362,13 @@ export function buildGrandMelaMap(textures: VillageTextureSet): VillageBuildResu
       height: 3.5,
       doorSide: b.doorSide,
       doorWidth: 2.3,
-      wallMaterial: new THREE.MeshStandardMaterial({ map: textures.wallCream, color: b.wallColor, roughness: 0.68 }),
+      wallMaterial: new THREE.MeshStandardMaterial({ map: textures.mudWall, color: b.wallColor, roughness: 0.68 }),
       floorMaterial: floorMat,
       roofStyle: 'pitched',
       roofColor: b.roofColor,
       trimColor: b.trimColor,
       textures,
-      minimapKind: 'shop',
+      minimapKind: 'market',
     });
   }
 
@@ -524,7 +524,7 @@ export function buildSnowHamletMap(textures: VillageTextureSet): VillageBuildRes
   // Carved Himalayan Monastery Pavilion with 8 Spinning Golden Prayer Wheels (North-Center at 0, -22.5)!
   const monX = 0;
   const monZ = -22.5;
-  const whiteStucco = new THREE.MeshStandardMaterial({ map: textures.wallCream, color: 0xf5f2eb, roughness: 0.72 });
+  const whiteStucco = new THREE.MeshStandardMaterial({ map: textures.mudWall, color: 0xf5f2eb, roughness: 0.72 });
   const maroonMat = new THREE.MeshStandardMaterial({ color: 0x8c2332, roughness: 0.65 });
   const goldMat = new THREE.MeshStandardMaterial({ color: 0xf2c249, roughness: 0.26, metalness: 0.82 });
 

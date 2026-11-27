@@ -19,6 +19,7 @@ import {
   disposeCharacterRig,
 } from './characters';
 import { setFaceTextureAnisotropy } from './characterFaces';
+import { MAX_STEP_UP_HEIGHT, resolveWorldCollisions } from './collisionSolver';
 import { buildLevelMap } from './levelBuilder';
 import { SkeletonVampireController } from './skeletonVampireNpc';
 import {
@@ -35,6 +36,7 @@ import {
   PlayerTransformPayload,
   ServerToClientMessage,
 } from './multiplayerTypes';
+import { RemotePlayerInterpolator } from './remoteInterpolation';
 import {
   AudioSettings,
   CameraSettings,
@@ -151,6 +153,7 @@ interface ParticipantActor {
   remoteAnimState?: CharacterAnimState;
   remoteExpression?: FacialExpression;
   remoteAnimElapsed?: number;
+  remoteInterpolator?: RemotePlayerInterpolator;
   nameplateSprite?: THREE.Sprite | null;
   chatBubbleSprite?: THREE.Sprite | null;
   chatBubbleTimer?: number;
@@ -306,6 +309,7 @@ export class ChhupanChhupaiEngine {
 
   private graphicsQuality: GraphicsQuality = loadInitialGraphicsQuality();
   private levelCache = new Map<number, VillageBuildResult>();
+  private occluderCache = new Map<number, THREE.Mesh[]>();
   private npcCache = new Map<number, VillageNpcSystem>();
   private activeNpcSystem: VillageNpcSystem | null = null;
   private activeMapAnimate: ((elapsed: number, dt: number) => void) | null = null;
@@ -313,6 +317,8 @@ export class ChhupanChhupaiEngine {
   private templeBells: TempleBellInteractive[] = [];
   private mapSeats: SeatSpot[] = [];
   private currentLevelId = 1;
+  private loadedWorldLevelId = 0;
+  private pendingWorldLoadFrame: number | null = null;
   private unlockedLevel = loadUnlockedLevel();
   private newlyUnlockedLevel: number | null = null;
   private activeLevelConfig: LevelConfig = getLevelConfig(1);
@@ -381,6 +387,11 @@ export class ChhupanChhupaiEngine {
   private onlineLocalPlayerId: string | null = null;
   private currentOnlineRound = 0;
   private onlineSendAccum = 0;
+  private onlineHeartbeatAccum = 0;
+  private onlineSendIntervalSec = 0.066;
+  private remoteExtraDelayMs = 0;
+  private lastSentOnlineState: PlayerTransformPayload | null = null;
+  private processedTagEventKeys = new Set<string>();
   private onOnlineLocalState: ((state: PlayerTransformPayload) => void) | null =
     null;
   private onOnlineTagRequest: ((targetPlayerId: string) => void) | null = null;
@@ -787,11 +798,50 @@ export class ChhupanChhupaiEngine {
     this.loadLevelWorld(this.currentLevelId);
   }
 
+  private cancelPendingWorldLoad(): void {
+    if (this.pendingWorldLoadFrame !== null) {
+      cancelAnimationFrame(this.pendingWorldLoadFrame);
+      this.pendingWorldLoadFrame = null;
+    }
+  }
+
+  private flushPendingLevelWorld(): void {
+    this.cancelPendingWorldLoad();
+    if (this.loadedWorldLevelId !== this.currentLevelId) {
+      this.loadLevelWorld(this.currentLevelId);
+    }
+  }
+
+  private scheduleLevelWorldLoad(levelId: number): void {
+    this.cancelPendingWorldLoad();
+    this.pendingWorldLoadFrame = requestAnimationFrame(() => {
+      this.pendingWorldLoadFrame = null;
+      if (this.disposed) return;
+      if (this.currentLevelId !== levelId) return;
+      if (this.loadedWorldLevelId !== levelId) {
+        this.loadLevelWorld(levelId);
+      }
+      if (this.phase === 'start') {
+        this.repositionPreviewCharacters();
+        const sp = this.activeSpawnPoints;
+        if (sp) {
+          this.camera.position.set(
+            sp.previewCamPos[0],
+            sp.previewCamPos[1],
+            sp.previewCamPos[2],
+          );
+        }
+      }
+    });
+  }
+
   private loadLevelWorld(levelId: number): void {
     if (!this.textures) return;
+    this.cancelPendingWorldLoad();
     this.detachWorldGroup();
 
     this.currentLevelId = levelId;
+    this.loadedWorldLevelId = levelId;
     this.audio.setActiveLevel(levelId);
     this.activeLevelConfig = getLevelConfig(levelId);
     this.applyLevelAtmosphere(this.activeLevelConfig);
@@ -846,34 +896,63 @@ export class ChhupanChhupaiEngine {
       this.scene.add(this.skeletonVampire.group);
     }
 
-    // Collect solid walls, buildings, trunks & large props for 3D camera wall avoidance
-    built.group.updateMatrixWorld(true);
-    const foliageSet = new Set<THREE.Object3D>();
-    for (const f of built.swayFoliage) {
-      f.traverse((child) => foliageSet.add(child));
+    // Collect (and cache) solid walls, buildings, trunks & large props for 3D camera wall avoidance
+    let occluders = this.occluderCache.get(levelId);
+    if (!occluders) {
+      built.group.updateMatrixWorld(true);
+      const foliageSet = new Set<THREE.Object3D>();
+      for (const f of built.swayFoliage) {
+        f.traverse((child) => foliageSet.add(child));
+      }
+
+      occluders = [];
+      const bounds = new THREE.Box3();
+      const size = new THREE.Vector3();
+      const center = new THREE.Vector3();
+      const climbableBoxes = this.colliders.boxes.filter(
+        (b) => b.climbable && b.topY !== undefined,
+      );
+
+      built.group.traverse((obj) => {
+        if (!(obj instanceof THREE.Mesh)) return;
+        if (obj === built.pondWater) return;
+        if (foliageSet.has(obj)) return;
+
+        const mat = obj.material as THREE.MeshStandardMaterial | undefined;
+        if (mat && mat.transparent && mat.opacity < 0.85) return;
+
+        bounds.setFromObject(obj);
+        bounds.getSize(size);
+        bounds.getCenter(center);
+
+        // Skip flat ground/roads/plinths/low furniture/curbs and giant outer terrain surfaces
+        if (size.y < 1.15) return;
+        if (size.x > 35 || size.z > 35) return;
+
+        // Skip thin posts, stair banisters, railings, poles, and slender trims that cause jittery camera snaps
+        if (Math.max(size.x, size.z) < 0.72) return;
+
+        // Skip climbable stair blocks and walkable step plinths so stairs never pull the camera in
+        let isStairBlock = false;
+        for (let i = 0; i < climbableBoxes.length; i++) {
+          const cb = climbableBoxes[i];
+          if (
+            center.x >= cb.minX - 0.15 &&
+            center.x <= cb.maxX + 0.15 &&
+            center.z >= cb.minZ - 0.15 &&
+            center.z <= cb.maxZ + 0.15 &&
+            Math.abs(bounds.max.y - (cb.topY ?? 0)) <= 0.35
+          ) {
+            isStairBlock = true;
+            break;
+          }
+        }
+        if (isStairBlock) return;
+
+        occluders!.push(obj);
+      });
+      this.occluderCache.set(levelId, occluders);
     }
-
-    const occluders: THREE.Mesh[] = [];
-    const bounds = new THREE.Box3();
-    const size = new THREE.Vector3();
-
-    built.group.traverse((obj) => {
-      if (!(obj instanceof THREE.Mesh)) return;
-      if (obj === built.pondWater) return;
-      if (foliageSet.has(obj)) return;
-
-      const mat = obj.material as THREE.MeshStandardMaterial | undefined;
-      if (mat && mat.transparent && mat.opacity < 0.85) return;
-
-      bounds.setFromObject(obj);
-      bounds.getSize(size);
-
-      // Skip flat ground/roads/plinths/crops and giant outer terrain surfaces
-      if (size.y < 0.65) return;
-      if (size.x > 35 || size.z > 35) return;
-
-      occluders.push(obj);
-    });
 
     this.cameraController?.setWorldCollisionData(occluders, this.colliders);
   }
@@ -881,23 +960,20 @@ export class ChhupanChhupaiEngine {
   public selectLevel(levelId: number): boolean {
     if (levelId < 1 || levelId > TOTAL_LEVELS) return false;
     if (!isLevelUnlocked(levelId, this.unlockedLevel)) return false;
-    this.audio.unlock();
-    if (levelId === this.currentLevelId) return true;
-
-    this.newlyUnlockedLevel = null;
-    this.loadLevelWorld(levelId);
-    if (this.phase === 'start') {
-      this.rebuildPreviewCharacter();
-      const sp = this.activeSpawnPoints;
-      if (sp) {
-        this.camera.position.set(
-          sp.previewCamPos[0],
-          sp.previewCamPos[1],
-          sp.previewCamPos[2],
-        );
-      }
+    this.audio.playUiClick();
+    if (levelId === this.currentLevelId && this.loadedWorldLevelId === levelId) {
+      return true;
     }
+
+    // Update HUD immediately so the tapped level selects on the very first click
+    // without blocking the main thread while Three.js builds the 3D map.
+    this.newlyUnlockedLevel = null;
+    this.currentLevelId = levelId;
+    this.activeLevelConfig = getLevelConfig(levelId);
+    this.audio.setActiveLevel(levelId);
     this.emitHud();
+
+    this.scheduleLevelWorldLoad(levelId);
     return true;
   }
 
@@ -1229,6 +1305,48 @@ export class ChhupanChhupaiEngine {
     }
   }
 
+  private repositionPreviewCharacters(): void {
+    if (this.phase !== 'start') return;
+    if (!this.previewRig) {
+      this.rebuildPreviewCharacter();
+      return;
+    }
+    const previewPos = this.activeSpawnPoints?.previewPos ?? [0.2, 0, 7.6];
+    this.previewRig.root.position.set(previewPos[0], previewPos[1], previewPos[2]);
+    this.previewRig.root.rotation.y = 0.24;
+
+    const slotOffsets = [
+      { dx: -1.42, dz: -2.05 },
+      { dx: -0.58, dz: -3.05 },
+      { dx: 0.65, dz: -2.95 },
+      { dx: 1.46, dz: -2.0 },
+    ];
+
+    for (let i = 0; i < this.backgroundCastRigs.length; i++) {
+      const bg = this.backgroundCastRigs[i];
+      const slot = slotOffsets[i % slotOffsets.length];
+      _probePos.set(
+        previewPos[0] + slot.dx,
+        previewPos[1],
+        previewPos[2] + slot.dz,
+      );
+      this.resolveCollisions(_probePos, CHAR_RADIUS * 1.15);
+
+      const dHero = Math.hypot(
+        _probePos.x - previewPos[0],
+        _probePos.z - previewPos[2],
+      );
+      if (dHero < 1.15) {
+        _probePos.z = previewPos[2] - 1.5;
+        _probePos.x = previewPos[0] + (slot.dx < 0 ? -1.1 : 1.1);
+        this.resolveCollisions(_probePos, CHAR_RADIUS * 1.1);
+      }
+
+      bg.rig.root.position.set(_probePos.x, previewPos[1], _probePos.z);
+      bg.rig.root.rotation.y = bg.baseRotY;
+    }
+  }
+
   public setStartShowcaseMode(mode: 'menu' | 'panel'): void {
     this.startShowcaseMode = mode;
   }
@@ -1463,6 +1581,7 @@ export class ChhupanChhupaiEngine {
     role: TeamRole,
     customization: CharacterCustomization,
   ): void {
+    this.flushPendingLevelWorld();
     this.exploreMode = false;
     this.levelBeforeExplore = null;
     this.onlineMode = false;
@@ -1595,22 +1714,20 @@ export class ChhupanChhupaiEngine {
 
   public previewOnlineLobbyMap(levelId: number): void {
     if (levelId < 1 || levelId > TOTAL_LEVELS) return;
-    if (levelId === this.currentLevelId && this.phase === 'start') return;
+    if (
+      levelId === this.currentLevelId &&
+      this.loadedWorldLevelId === levelId &&
+      this.phase === 'start'
+    ) {
+      return;
+    }
 
     this.newlyUnlockedLevel = null;
-    this.loadLevelWorld(levelId);
-    if (this.phase === 'start') {
-      this.rebuildPreviewCharacter();
-      const sp = this.activeSpawnPoints;
-      if (sp) {
-        this.camera.position.set(
-          sp.previewCamPos[0],
-          sp.previewCamPos[1],
-          sp.previewCamPos[2],
-        );
-      }
-    }
+    this.currentLevelId = levelId;
+    this.activeLevelConfig = getLevelConfig(levelId);
+    this.audio.setActiveLevel(levelId);
     this.emitHud();
+    this.scheduleLevelWorldLoad(levelId);
   }
 
   private setupOnlineMatch(
@@ -1620,7 +1737,7 @@ export class ChhupanChhupaiEngine {
     if (!this.textures) return;
     this.audio.unlock();
 
-    if (this.currentLevelId !== room.levelId) {
+    if (this.loadedWorldLevelId !== room.levelId) {
       this.loadLevelWorld(room.levelId);
     }
 
@@ -1631,6 +1748,9 @@ export class ChhupanChhupaiEngine {
     this.currentOnlineRound = room.roundNumber;
     this.matchSequenceId += 1;
     this.onlineSendAccum = 0;
+    this.onlineHeartbeatAccum = 0;
+    this.lastSentOnlineState = null;
+    this.processedTagEventKeys.clear();
     this.phase = 'playing';
     this.keysPressed.clear();
     this.touchMoveX = 0;
@@ -1715,6 +1835,18 @@ export class ChhupanChhupaiEngine {
         remoteTargetZ: p.z,
         remoteTargetRotY: p.rotY,
         remoteAnimState: p.animState,
+        remoteInterpolator: !isLocal
+          ? new RemotePlayerInterpolator({
+              x: p.x,
+              y: p.y ?? 0,
+              z: p.z,
+              rotY: p.rotY,
+              moveSpeed: p.moveSpeed,
+              isHiding: p.isHiding,
+              animState: p.animState,
+              expression: p.expression,
+            })
+          : undefined,
         nameplateSprite,
       };
 
@@ -1769,7 +1901,10 @@ export class ChhupanChhupaiEngine {
         this.clearActors();
         this.updateHouseRoofVisibility(null);
       }
-      if (this.currentLevelId !== room.levelId) {
+      if (
+        this.currentLevelId !== room.levelId ||
+        this.loadedWorldLevelId !== room.levelId
+      ) {
         this.previewOnlineLobbyMap(room.levelId);
       } else if (!this.previewRig) {
         this.rebuildPreviewCharacter();
@@ -1783,7 +1918,7 @@ export class ChhupanChhupaiEngine {
         !this.onlineMode ||
         this.phase !== 'playing' ||
         this.currentOnlineRound !== room.roundNumber ||
-        this.currentLevelId !== room.levelId;
+        this.loadedWorldLevelId !== room.levelId;
 
       if (needsInit) {
         this.setupOnlineMatch(room, localPlayerId);
@@ -1864,9 +1999,65 @@ export class ChhupanChhupaiEngine {
       }
     }
 
-    // Update live caught / hiding state
-    for (const p of room.players) {
-      const actor = this.actors.find((a) => a.id === p.id);
+    // Update live caught / hiding state and idempotently spawn any missing actor
+    for (let i = 0; i < room.players.length; i++) {
+      const p = room.players[i];
+      let actor = this.actors.find((a) => a.id === p.id);
+      if (!actor && this.textures) {
+        const isLocal = p.id === this.onlineLocalPlayerId;
+        const rig = createCharacterFromCustomization(
+          p.customization,
+          p.role === 'seeker',
+          this.textures.contactShadow,
+        );
+        rig.root.position.set(p.x, p.y ?? 0, p.z);
+        rig.root.rotation.y = p.rotY;
+        const nameplateSprite = this.createNameplateSprite(p.name, p.role);
+        rig.root.add(nameplateSprite);
+        if (p.caught) {
+          rig.root.visible = false;
+        }
+        this.scene.add(rig.root);
+        actor = {
+          id: p.id,
+          name: p.name,
+          role: p.role,
+          isPlayer: isLocal,
+          isRemote: !isLocal,
+          rig,
+          caught: p.caught,
+          caughtAtSeconds: p.caughtAtSeconds,
+          caughtAnimElapsed: p.caught ? CAUGHT_ANIM_DURATION : 0,
+          isHiding: p.isHiding,
+          lastMoveSpeed: p.moveSpeed,
+          vy: 0,
+          grounded: (p.y ?? 0) <= 0.05,
+          radarSeed: (i + 1) * 1.73 + 0.5,
+          targetSpotIndex: -1,
+          waypoints: [],
+          retargetCooldown: 0,
+          remoteTargetX: p.x,
+          remoteTargetY: p.y ?? 0,
+          remoteTargetZ: p.z,
+          remoteTargetRotY: p.rotY,
+          remoteAnimState: p.animState,
+          remoteInterpolator: !isLocal
+            ? new RemotePlayerInterpolator({
+                x: p.x,
+                y: p.y ?? 0,
+                z: p.z,
+                rotY: p.rotY,
+                moveSpeed: p.moveSpeed,
+                isHiding: p.isHiding,
+                animState: p.animState,
+                expression: p.expression,
+              })
+            : undefined,
+          nameplateSprite,
+        };
+        this.actors.push(actor);
+        continue;
+      }
       if (!actor) continue;
 
       if (!actor.caught && p.caught) {
@@ -1913,10 +2104,35 @@ export class ChhupanChhupaiEngine {
     }
   }
 
+  public setNetworkRtt(rttMs: number | null): void {
+    if (rttMs === null || !Number.isFinite(rttMs)) {
+      this.onlineSendIntervalSec = 0.066;
+      this.remoteExtraDelayMs = 0;
+      return;
+    }
+    if (rttMs > 260) {
+      this.onlineSendIntervalSec = 0.095;
+      this.remoteExtraDelayMs = 45;
+    } else if (rttMs > 150) {
+      this.onlineSendIntervalSec = 0.08;
+      this.remoteExtraDelayMs = 24;
+    } else {
+      this.onlineSendIntervalSec = 0.066;
+      this.remoteExtraDelayMs = 0;
+    }
+  }
+
   public applyOnlinePositions(
     positions: NonNullable<ServerToClientMessage['positions']>,
+    serverTime?: number,
   ): void {
     if (!this.onlineMode || this.phase !== 'playing') return;
+    const receiveMs = performance.now();
+    const packetServerTime =
+      typeof serverTime === 'number' && Number.isFinite(serverTime)
+        ? serverTime
+        : receiveMs;
+
     for (const pos of positions) {
       const actor = this.actors.find((a) => a.id === pos.id);
       if (!actor || actor.isPlayer) continue;
@@ -1931,6 +2147,33 @@ export class ChhupanChhupaiEngine {
         actor.remoteAnimElapsed = 0;
       }
       actor.remoteExpression = pos.expression;
+
+      if (!actor.remoteInterpolator) {
+        actor.remoteInterpolator = new RemotePlayerInterpolator({
+          x: actor.rig.root.position.x,
+          y: actor.rig.root.position.y,
+          z: actor.rig.root.position.z,
+          rotY: actor.rig.root.rotation.y,
+          moveSpeed: pos.moveSpeed,
+          isHiding: pos.isHiding,
+          animState: pos.animState,
+          expression: pos.expression,
+        });
+      }
+      actor.remoteInterpolator.pushSnapshot(
+        {
+          x: pos.x,
+          y: pos.y ?? 0,
+          z: pos.z,
+          rotY: pos.rotY,
+          moveSpeed: pos.moveSpeed,
+          isHiding: pos.isHiding,
+          animState: pos.animState,
+          expression: pos.expression,
+        },
+        packetServerTime,
+        receiveMs,
+      );
     }
   }
 
@@ -1945,7 +2188,14 @@ export class ChhupanChhupaiEngine {
         if (event.message) this.showBanner(event.message, 2.8);
         this.emitHud();
         break;
-      case 'tag_caught':
+      case 'tag_caught': {
+        const dedupeKey = `${this.currentOnlineRound}:${event.taggedPlayerId ?? ''}`;
+        if (event.taggedPlayerId && this.processedTagEventKeys.has(dedupeKey)) {
+          break;
+        }
+        if (event.taggedPlayerId) {
+          this.processedTagEventKeys.add(dedupeKey);
+        }
         this.audio.playTagCaught();
         if (this.seekerActor) {
           this.seekerActor.tagLungeTimer = 0.48;
@@ -1953,6 +2203,7 @@ export class ChhupanChhupaiEngine {
         if (event.message) this.showBanner(event.message, 3.0);
         this.emitHud();
         break;
+      }
       case 'hider_slap': {
         const slapper = event.slapperPlayerId
           ? this.actors.find((a) => a.id === event.slapperPlayerId)
@@ -1997,13 +2248,15 @@ export class ChhupanChhupaiEngine {
     this.onlineMode = false;
     this.onlineLocalPlayerId = null;
     this.currentOnlineRound = 0;
+    this.lastSentOnlineState = null;
+    this.processedTagEventKeys.clear();
     if (!isLevelUnlocked(this.currentLevelId, this.unlockedLevel)) {
       this.loadLevelWorld(this.unlockedLevel);
     }
     this.returnToStart();
   }
 
-  private emitOnlineLocalState(): void {
+  private emitOnlineLocalState(force = false): void {
     if (
       !this.onlineMode ||
       !this.playerActor ||
@@ -2013,16 +2266,45 @@ export class ChhupanChhupaiEngine {
       return;
     }
     const pos = this.playerActor.rig.root.position;
-    this.onOnlineLocalState({
-      x: pos.x,
-      y: pos.y,
-      z: pos.z,
-      rotY: this.playerActor.rig.root.rotation.y,
-      moveSpeed: this.playerActor.lastMoveSpeed,
+    const nextState: PlayerTransformPayload = {
+      x: Math.round(pos.x * 100) / 100,
+      y: Math.round(pos.y * 100) / 100,
+      z: Math.round(pos.z * 100) / 100,
+      rotY: Math.round(this.playerActor.rig.root.rotation.y * 1000) / 1000,
+      moveSpeed: Math.round(this.playerActor.lastMoveSpeed * 100) / 100,
       isHiding: this.playerActor.isHiding,
       animState: this.lastPlayerAnimState,
       expression: this.lastPlayerExpression,
-    });
+    };
+
+    const prev = this.lastSentOnlineState;
+    if (!force && prev) {
+      const discreteChanged =
+        prev.isHiding !== nextState.isHiding ||
+        prev.animState !== nextState.animState ||
+        prev.expression !== nextState.expression;
+      const movedEnough =
+        Math.abs(prev.x - nextState.x) >= 0.015 ||
+        Math.abs((prev.y ?? 0) - (nextState.y ?? 0)) >= 0.015 ||
+        Math.abs(prev.z - nextState.z) >= 0.015;
+      const rotatedEnough = Math.abs(prev.rotY - nextState.rotY) >= 0.025;
+      const speedChanged = Math.abs(prev.moveSpeed - nextState.moveSpeed) >= 0.08;
+      const heartbeatDue = this.onlineHeartbeatAccum >= 1.0;
+
+      if (
+        !discreteChanged &&
+        !movedEnough &&
+        !rotatedEnough &&
+        !speedChanged &&
+        !heartbeatDue
+      ) {
+        return;
+      }
+    }
+
+    this.lastSentOnlineState = nextState;
+    this.onlineHeartbeatAccum = 0;
+    this.onOnlineLocalState(nextState);
   }
 
   public setMutedPlayerIds(mutedIds: Set<string>): void {
@@ -2185,32 +2467,68 @@ export class ChhupanChhupaiEngine {
   }
 
   private updateRemotePlayers(dt: number): void {
+    const nowMs = performance.now();
     for (const actor of this.actors) {
       if (!actor.isRemote || actor.caught) continue;
 
       const pos = actor.rig.root.position;
-      const targetX = actor.remoteTargetX ?? pos.x;
-      const targetY = actor.remoteTargetY ?? 0;
-      const targetZ = actor.remoteTargetZ ?? pos.z;
-      const distJump = Math.hypot(targetX - pos.x, targetZ - pos.z);
+      const prevX = pos.x;
+      const prevZ = pos.z;
 
-      if (distJump > 10) {
-        pos.x = targetX;
-        pos.y = targetY;
-        pos.z = targetZ;
+      if (actor.remoteInterpolator) {
+        const sampled = actor.remoteInterpolator.sample(
+          nowMs,
+          dt,
+          this.remoteExtraDelayMs,
+        );
+        if (sampled) {
+          pos.x = sampled.x;
+          pos.y = sampled.y;
+          pos.z = sampled.z;
+          actor.rig.root.rotation.y = sampled.rotY;
+          actor.isHiding = sampled.isHiding;
+
+          const derivedSpeed =
+            dt > 0.0001
+              ? Math.hypot(pos.x - prevX, pos.z - prevZ) / dt
+              : sampled.moveSpeed;
+          actor.lastMoveSpeed = sampled.teleported
+            ? sampled.moveSpeed
+            : Math.max(sampled.moveSpeed, Math.min(8.5, derivedSpeed * 0.85));
+
+          if (actor.remoteAnimState !== sampled.animState) {
+            actor.remoteAnimState = sampled.animState;
+            actor.remoteAnimElapsed = 0;
+          }
+          actor.remoteExpression = sampled.expression;
+        }
       } else {
-        pos.x = THREE.MathUtils.damp(pos.x, targetX, 14, dt);
-        pos.y = THREE.MathUtils.damp(pos.y, targetY, 18, dt);
-        pos.z = THREE.MathUtils.damp(pos.z, targetZ, 14, dt);
+        const targetX = actor.remoteTargetX ?? pos.x;
+        const targetY = actor.remoteTargetY ?? 0;
+        const targetZ = actor.remoteTargetZ ?? pos.z;
+        const distJump = Math.hypot(targetX - pos.x, targetZ - pos.z);
+
+        if (distJump > 10) {
+          pos.x = targetX;
+          pos.y = targetY;
+          pos.z = targetZ;
+        } else {
+          pos.x = THREE.MathUtils.damp(pos.x, targetX, 14, dt);
+          pos.y = THREE.MathUtils.damp(pos.y, targetY, 18, dt);
+          pos.z = THREE.MathUtils.damp(pos.z, targetZ, 14, dt);
+        }
+
+        if (actor.remoteTargetRotY !== undefined) {
+          const curYaw = actor.rig.root.rotation.y;
+          let diff = actor.remoteTargetRotY - curYaw;
+          while (diff > Math.PI) diff -= Math.PI * 2;
+          while (diff < -Math.PI) diff += Math.PI * 2;
+          actor.rig.root.rotation.y = curYaw + diff * (1 - Math.exp(-14 * dt));
+        }
       }
 
-      if (actor.remoteTargetRotY !== undefined) {
-        const curYaw = actor.rig.root.rotation.y;
-        let diff = actor.remoteTargetRotY - curYaw;
-        while (diff > Math.PI) diff -= Math.PI * 2;
-        while (diff < -Math.PI) diff += Math.PI * 2;
-        actor.rig.root.rotation.y = curYaw + diff * (1 - Math.exp(-14 * dt));
-      }
+      // Keep remote multiplayer characters out of solid walls and cows/buffaloes during interpolation
+      this.resolveCollisions(pos, CHAR_RADIUS);
 
       // Cancel emote visually if remote player starts moving briskly
       if (actor.lastMoveSpeed > 0.35 && actor.activeEmote) {
@@ -2320,8 +2638,10 @@ export class ChhupanChhupaiEngine {
     this.cameraController?.setEnabled(false);
     this.clearActors();
     this.updateHouseRoofVisibility(null);
-    if (restoreLevel !== null && restoreLevel !== this.currentLevelId) {
+    if (restoreLevel !== null && restoreLevel !== this.loadedWorldLevelId) {
       this.loadLevelWorld(restoreLevel);
+    } else if (this.loadedWorldLevelId !== this.currentLevelId) {
+      this.flushPendingLevelWorld();
     }
     this.rebuildPreviewCharacter();
     this.emitHud();
@@ -3464,115 +3784,14 @@ export class ChhupanChhupaiEngine {
   }
 
   private resolveCollisions(pos: THREE.Vector3, radius: number): number {
-    let supportY = 0;
-    const distSq = pos.x * pos.x + pos.z * pos.z;
-    const maxR = this.colliders.worldRadius - radius;
-    if (distSq > maxR * maxR) {
-      const dist = Math.sqrt(distSq);
-      pos.x = (pos.x / dist) * maxR;
-      pos.z = (pos.z / dist) * maxR;
-    }
-
-    for (const box of this.colliders.boxes) {
-      if (box.minY !== undefined && pos.y + 1.5 < box.minY) {
-        continue;
-      }
-      if (!box.climbable && box.topY !== undefined && pos.y >= box.topY - 0.08) {
-        continue;
-      }
-      if (
-        box.climbable &&
-        box.topY !== undefined &&
-        pos.y >= box.topY - 0.28
-      ) {
-        const tol = radius * 0.58;
-        if (
-          pos.x > box.minX - tol &&
-          pos.x < box.maxX + tol &&
-          pos.z > box.minZ - tol &&
-          pos.z < box.maxZ + tol
-        ) {
-          supportY = Math.max(supportY, box.topY);
-        }
-        continue;
-      }
-
-      const closestX = THREE.MathUtils.clamp(pos.x, box.minX, box.maxX);
-      const closestZ = THREE.MathUtils.clamp(pos.z, box.minZ, box.maxZ);
-      const dx = pos.x - closestX;
-      const dz = pos.z - closestZ;
-      const dSq = dx * dx + dz * dz;
-
-      if (dSq < radius * radius) {
-        if (dSq > 1e-6) {
-          const d = Math.sqrt(dSq);
-          const overlap = radius - d;
-          pos.x += (dx / d) * overlap;
-          pos.z += (dz / d) * overlap;
-        } else {
-          const left = Math.abs(pos.x - box.minX);
-          const right = Math.abs(box.maxX - pos.x);
-          const top = Math.abs(pos.z - box.minZ);
-          const bottom = Math.abs(box.maxZ - pos.z);
-          const m = Math.min(left, right, top, bottom);
-          if (m === left) pos.x = box.minX - radius;
-          else if (m === right) pos.x = box.maxX + radius;
-          else if (m === top) pos.z = box.minZ - radius;
-          else pos.z = box.maxZ + radius;
-        }
-      }
-    }
-
-    for (const c of this.colliders.circles) {
-      const dx = pos.x - c.x;
-      const dz = pos.z - c.z;
-      if (c.climbable && c.topY !== undefined && pos.y >= c.topY - 0.28) {
-        const climbR = c.radius + radius * 0.58;
-        if (dx * dx + dz * dz < climbR * climbR) {
-          supportY = Math.max(supportY, c.topY);
-        }
-        continue;
-      }
-
-      const minDist = radius + c.radius;
-      const dSq = dx * dx + dz * dz;
-      if (dSq < minDist * minDist) {
-        const d = Math.sqrt(dSq) || 0.001;
-        const overlap = minDist - d;
-        pos.x += (dx / d) * overlap;
-        pos.z += (dz / d) * overlap;
-      }
-    }
-
-    // Dynamic 3D oriented-capsule collisions against village cows & buffaloes on all maps
-    if (this.activeNpcSystem?.resolveLargeAnimalCollisions(pos, radius)) {
-      // Safety re-clamp against solid world boxes & perimeter so animals never push a player into a wall
-      for (const box of this.colliders.boxes) {
-        if (box.minY !== undefined && pos.y + 1.5 < box.minY) continue;
-        if (box.topY !== undefined && pos.y >= box.topY - (box.climbable ? 0.28 : 0.08)) {
-          continue;
-        }
-        const closestX = THREE.MathUtils.clamp(pos.x, box.minX, box.maxX);
-        const closestZ = THREE.MathUtils.clamp(pos.z, box.minZ, box.maxZ);
-        const dx = pos.x - closestX;
-        const dz = pos.z - closestZ;
-        const dSq = dx * dx + dz * dz;
-        if (dSq < radius * radius && dSq > 1e-6) {
-          const d = Math.sqrt(dSq);
-          const overlap = radius - d;
-          pos.x += (dx / d) * overlap;
-          pos.z += (dz / d) * overlap;
-        }
-      }
-      const postDistSq = pos.x * pos.x + pos.z * pos.z;
-      if (postDistSq > maxR * maxR) {
-        const postDist = Math.sqrt(postDistSq);
-        pos.x = (pos.x / postDist) * maxR;
-        pos.z = (pos.z / postDist) * maxR;
-      }
-    }
-
-    return supportY;
+    return resolveWorldCollisions(
+      pos,
+      radius,
+      this.colliders,
+      this.activeNpcSystem
+        ? (p, r) => this.activeNpcSystem!.resolveLargeAnimalCollisions(p, r)
+        : undefined,
+    );
   }
 
   private hasLineOfSight(from: THREE.Vector3, to: THREE.Vector3): boolean {
@@ -3969,7 +4188,6 @@ export class ChhupanChhupaiEngine {
 
       actor.rig.root.position.x += _moveDir.x * actualSpeed * dt;
       actor.rig.root.position.z += _moveDir.z * actualSpeed * dt;
-      this.resolveCollisions(actor.rig.root.position, CHAR_RADIUS);
 
       const targetYaw = Math.atan2(_moveDir.x, _moveDir.z);
       const currentYaw = actor.rig.root.rotation.y;
@@ -3984,16 +4202,16 @@ export class ChhupanChhupaiEngine {
     const pos = actor.rig.root.position;
     let supportY = this.resolveCollisions(pos, CHAR_RADIUS);
 
-    if (actor.grounded && supportY > pos.y && supportY <= pos.y + 0.28) {
-      pos.y = THREE.MathUtils.damp(pos.y, supportY, 24, dt);
-      if (supportY - pos.y < 0.012) pos.y = supportY;
-    } else if (actor.grounded && pos.y > supportY && pos.y - supportY <= 0.28) {
+    if (actor.grounded && supportY > pos.y && supportY <= pos.y + MAX_STEP_UP_HEIGHT) {
+      pos.y = THREE.MathUtils.damp(pos.y, supportY, 32, dt);
+      if (supportY - pos.y < 0.015) pos.y = supportY;
+    } else if (actor.grounded && pos.y > supportY && pos.y - supportY <= MAX_STEP_UP_HEIGHT) {
       // Smooth grounded step-down when walking down temple steps or staircases
-      pos.y = THREE.MathUtils.damp(pos.y, supportY, 24, dt);
-      if (pos.y - supportY < 0.012) pos.y = supportY;
+      pos.y = THREE.MathUtils.damp(pos.y, supportY, 28, dt);
+      if (pos.y - supportY < 0.015) pos.y = supportY;
     }
 
-    if (actor.grounded && pos.y > supportY + 0.28) {
+    if (actor.grounded && pos.y > supportY + MAX_STEP_UP_HEIGHT) {
       actor.grounded = false;
       actor.vy = 0;
     }
@@ -5336,9 +5554,19 @@ export class ChhupanChhupaiEngine {
           this.updateTagRings(dt);
 
           this.onlineSendAccum += dt;
-          if (this.onlineSendAccum >= 0.05) {
+          this.onlineHeartbeatAccum += dt;
+          const discretePending =
+            this.playerActor !== null &&
+            this.lastSentOnlineState !== null &&
+            (this.lastSentOnlineState.isHiding !== this.playerActor.isHiding ||
+              this.lastSentOnlineState.animState !== this.lastPlayerAnimState ||
+              this.lastSentOnlineState.expression !== this.lastPlayerExpression);
+          if (
+            discretePending ||
+            this.onlineSendAccum >= this.onlineSendIntervalSec
+          ) {
             this.onlineSendAccum = 0;
-            this.emitOnlineLocalState();
+            this.emitOnlineLocalState(discretePending);
           }
           this.emitHud();
         } else if (this.exploreMode) {
@@ -5662,6 +5890,7 @@ export class ChhupanChhupaiEngine {
 
   public dispose(): void {
     this.disposed = true;
+    this.cancelPendingWorldLoad();
     cancelAnimationFrame(this.frameId);
     clearTimeout(this.frameId);
 
@@ -5725,6 +5954,7 @@ export class ChhupanChhupaiEngine {
       collectDisposable(cached.group);
     }
     this.levelCache.clear();
+    this.occluderCache.clear();
     this.cloudSprites = [];
 
     if (this.skyDomeMesh) {

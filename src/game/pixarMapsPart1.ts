@@ -168,17 +168,17 @@ export function buildHillStationMap(textures: VillageTextureSet): VillageBuildRe
 
   // 6 Enterable Timber-Framed Hill Cottages with Puffing Stone Chimneys!
   const cottageWallCream = new THREE.MeshStandardMaterial({
-    map: textures.wallCream,
+    map: textures.mudWall,
     color: 0xf4ead8,
     roughness: 0.78,
   });
   const cottageWallBlue = new THREE.MeshStandardMaterial({
-    map: textures.wallCream,
+    map: textures.mudWall,
     color: 0xdbe9f4,
     roughness: 0.78,
   });
   const cottageWallButter = new THREE.MeshStandardMaterial({
-    map: textures.wallOchre,
+    map: textures.mudWallOchre,
     color: 0xf2dfb5,
     roughness: 0.8,
   });
@@ -408,7 +408,7 @@ export function buildDesertFortMap(textures: VillageTextureSet): VillageBuildRes
     roughness: 0.78,
   });
   const carvedMat = new THREE.MeshStandardMaterial({
-    map: textures.wallOchre,
+    map: textures.mudWallOchre,
     color: 0xd99b52,
     roughness: 0.74,
   });
@@ -711,8 +711,8 @@ export function buildTeaEstateMap(textures: VillageTextureSet): VillageBuildResu
   addRoadSegment(ctx, 11.5, 0, 3.6, 62, 0, textures, 0x9e714c);
 
   // Planter's Bungalow (West) & Tea Drying Factory with Spinning Wooden Waterwheel (East)!
-  const bungalowWall = new THREE.MeshStandardMaterial({ map: textures.wallCream, color: 0xf0f4ec, roughness: 0.78 });
-  const factoryWall = new THREE.MeshStandardMaterial({ map: textures.brick, color: 0xb85842, roughness: 0.84 });
+  const bungalowWall = new THREE.MeshStandardMaterial({ map: textures.mudWall, color: 0xf0f4ec, roughness: 0.78 });
+  const factoryWall = new THREE.MeshStandardMaterial({ map: textures.wellBrick, color: 0xb85842, roughness: 0.84 });
   const floorMat = new THREE.MeshStandardMaterial({ map: textures.wood, color: 0x734e32, roughness: 0.85 });
 
   buildEnterableRoom(ctx, {
@@ -754,7 +754,7 @@ export function buildTeaEstateMap(textures: VillageTextureSet): VillageBuildResu
     roofColor: 0x456b73,
     trimColor: 0x2b3e42,
     textures,
-    minimapKind: 'shop',
+    minimapKind: 'market',
     addInteriorProps: (g) => {
       addVisualBox(g, 0, 0.52, -1.8, 4.2, 1.04, 1.1, woodMat);
     },
@@ -829,7 +829,7 @@ export function buildTeaEstateMap(textures: VillageTextureSet): VillageBuildResu
       { topY: 1.18, climbable: false },
     );
     ctx.swayFoliage.push(hedge);
-    ctx.hidingSpots.push({ x: hx, z: hz + 1.8, label: 'Between Emerald Tea Bushes', kind: 'farm' });
+    ctx.hidingSpots.push({ x: hx, z: hz + 1.8, label: 'Between Emerald Tea Bushes', kind: 'gully' });
   });
 
   // Lush Pixar Shade Trees & Tea Basket Crates
@@ -1038,7 +1038,7 @@ export function buildCoastalLighthouseMap(textures: VillageTextureSet): VillageB
       height: 3.3,
       doorSide: c.doorSide,
       doorWidth: 2.1,
-      wallMaterial: new THREE.MeshStandardMaterial({ map: textures.wallCream, color: c.wallColor, roughness: 0.72 }),
+      wallMaterial: new THREE.MeshStandardMaterial({ map: textures.mudWall, color: c.wallColor, roughness: 0.72 }),
       floorMaterial: tileFloor,
       roofStyle: 'pitched',
       roofColor: 0xc24c2e,

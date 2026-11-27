@@ -596,21 +596,37 @@ export function buildHauntedHaveliMap(
     tread: number;
     mat: THREE.Material;
     railings?: boolean;
+    solidBase?: boolean;
   }) => {
-    const { startX, startZ, startY, endY, dir, width, steps, tread, mat, railings = true } = opts;
+    const {
+      startX,
+      startZ,
+      startY,
+      endY,
+      dir,
+      width,
+      steps,
+      tread,
+      mat,
+      railings = true,
+      solidBase = false,
+    } = opts;
     const totalRise = endY - startY;
     const rise = totalRise / steps;
     const dx = dir === 'east' ? 1 : dir === 'west' ? -1 : 0;
     const dz = dir === 'south' ? 1 : dir === 'north' ? -1 : 0;
+    const baseY = Math.min(startY, endY);
 
     for (let i = 1; i <= steps; i++) {
       const stepTop = startY + rise * i;
       const dist = (i - 0.5) * tread;
       const sx = startX + dx * dist;
       const sz = startZ + dz * dist;
-      const sw = dx !== 0 ? tread + 0.04 : width;
-      const sd = dz !== 0 ? tread + 0.04 : width;
-      const stepThick = Math.max(0.24, Math.abs(rise) + 0.08);
+      const sw = dx !== 0 ? tread + 0.08 : width;
+      const sd = dz !== 0 ? tread + 0.08 : width;
+      const stepThick = solidBase
+        ? Math.max(0.24, stepTop - baseY)
+        : Math.max(0.24, Math.abs(rise) + 0.08);
 
       const stepMesh = new THREE.Mesh(getBox(sw, stepThick, sd), mat);
       stepMesh.position.set(sx, stepTop - stepThick * 0.5, sz);
@@ -623,8 +639,8 @@ export function buildHauntedHaveliMap(
         maxX: sx + sw * 0.5,
         minZ: sz - sd * 0.5,
         maxZ: sz + sd * 0.5,
-        blocksSight: false,
-        minY: stepTop - 0.28,
+        blocksSight: solidBase && stepTop - baseY > 1.2,
+        minY: solidBase ? baseY : stepTop - 0.28,
         topY: stepTop,
         climbable: true,
       });
@@ -1489,9 +1505,12 @@ export function buildHauntedHaveliMap(
   cellarFloor.receiveShadow = true;
   ctx.group.add(cellarFloor);
 
-  // Perimeter stone cellar walls (topY: 2.52 so upper North Royal Wing at y=2.6 walks right over!)
-  // South retaining wall separating courtyard (z = -15.2) with open wing entries on West/East edges
-  addFloorBox(0, -15.2, 31.6, 2.55, 0.5, 0, cellarStoneMat, { colliderTopY: 2.5 });
+  // Perimeter stone cellar walls (topY: 2.5 so upper North Royal Wing at y=2.6 walks right over!)
+  // South retaining wall separating courtyard (z = -15.2), split cleanly around the Grand Central Staircase
+  // so cellar players stay sealed inside while staircase climbers at steps 10-12 (y >= 2.17) never hit it!
+  addFloorBox(-9.15, -15.2, 13.3, 2.55, 0.5, 0, cellarStoneMat, { colliderTopY: 2.5 });
+  addFloorBox(9.15, -15.2, 13.3, 2.55, 0.5, 0, cellarStoneMat, { colliderTopY: 2.5 });
+  addFloorBox(0, -15.2, 5.2, 2.55, 0.5, 0, cellarStoneMat, { colliderTopY: 1.95 });
   // West cellar outer wall (x = -24)
   addFloorBox(-24, -23.0, 0.5, 2.55, 16.0, 0, cellarStoneMat, { colliderTopY: 2.5 });
   // East cellar outer wall (x = 24)
@@ -1570,11 +1589,12 @@ export function buildHauntedHaveliMap(
     tread: 0.36,
     mat: sandstoneMat,
     railings: true,
+    solidBase: true,
   });
 
   // Secret Interior Wooden Staircase descending from NW Durbar Corner (y=2.6) down into Underground Tehkhana (y=0)!
   buildStaircase({
-    startX: -12.6,
+    startX: -12.7,
     startZ: -28.4,
     startY: 2.6,
     endY: 0.0,
@@ -1611,10 +1631,12 @@ export function buildHauntedHaveliMap(
   addHangingCurtain(15.2, 2.6, -31.0, 2.4, 2.45, 0, 'In secret bookcase passage behind Library');
 
   // Interconnecting interior walls dividing Durbar Hall from NW Royal Bedroom & NE Library (wide 2.8m doorways!)
-  for (const divX of [-10.0, 10.0]) {
-    addFloorBox(divX, -27.2, 0.34, 3.1, 7.6, 2.6, plasterWallMat, { colliderMinY: 2.55, colliderTopY: 5.7 });
-    addFloorBox(divX, -17.6, 0.34, 3.1, 4.8, 2.6, plasterWallMat, { colliderMinY: 2.55, colliderTopY: 5.7 });
-  }
+  // West divider (x = -10) also leaves a clean 2.4m archway over the Secret Tehkhana Stairwell (z = -29.6..-27.2)
+  addFloorBox(-10.0, -30.3, 0.34, 3.1, 1.4, 2.6, plasterWallMat, { colliderMinY: 2.55, colliderTopY: 5.7 });
+  addFloorBox(-10.0, -25.3, 0.34, 3.1, 3.8, 2.6, plasterWallMat, { colliderMinY: 2.55, colliderTopY: 5.7 });
+  addFloorBox(-10.0, -17.6, 0.34, 3.1, 4.8, 2.6, plasterWallMat, { colliderMinY: 2.55, colliderTopY: 5.7 });
+  addFloorBox(10.0, -27.2, 0.34, 3.1, 7.6, 2.6, plasterWallMat, { colliderMinY: 2.55, colliderTopY: 5.7 });
+  addFloorBox(10.0, -17.6, 0.34, 3.1, 4.8, 2.6, plasterWallMat, { colliderMinY: 2.55, colliderTopY: 5.7 });
 
   // --- Grand Durbar Hall (x: -10..10, z: -31..-15.2, y = 2.6m) ---
   for (const dx of [-5.2, 5.2]) {

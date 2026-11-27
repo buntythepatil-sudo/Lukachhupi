@@ -6,6 +6,7 @@ import {
   VillageColliders,
   VillageMinimapLayout,
 } from './types';
+import { resolveLargeAnimalCapsuleCollision } from './collisionSolver';
 import {
   AnimalAnimMode,
   AnimalRig,
@@ -236,7 +237,7 @@ interface MapNpcBlueprint {
     archetypes: [VillagerArchetype, VillagerArchetype];
     minQuality: QualityTier;
   }>;
-  cricket: {
+  cricket?: {
     x: number;
     z: number;
     rotY: number;
@@ -1419,7 +1420,7 @@ function getBlueprintForLevel(levelId: number): MapNpcBlueprint {
           },
         ],
         cyclists: [],
-        sitters: [],
+        charpaiSitters: [],
         marketPairs: [],
         chatGroups: [
           {
@@ -1435,7 +1436,6 @@ function getBlueprintForLevel(levelId: number): MapNpcBlueprint {
             minQuality: 'medium',
           },
         ],
-        cricket: null,
         animals:
           levelId === 15
             ? [
@@ -2204,7 +2204,7 @@ export class VillageNpcSystem {
     }
 
     // 6. Children playing gully cricket!
-    {
+    if (bp.cricket) {
       const cr = bp.cricket;
       const center = this.findClearSpot(cr.x, cr.z, 1.8);
       const pitchLen = cr.pitchLen ?? 6.0;
@@ -2934,60 +2934,15 @@ export class VillageNpcSystem {
       if (an.species !== 'cow' && an.species !== 'buffalo') continue;
       if (QUALITY_RANK[an.minQuality] > rank) continue;
 
-      // 3D vertical height check so players on balconies/rooftops above never hit ground animals
-      const bodyTopY =
-        an.state === 'rest'
-          ? 0.96
-          : an.species === 'buffalo'
-            ? 1.54
-            : 1.46;
-      if (pos.y >= bodyTopY) continue;
-
-      // Oriented 3D torso capsule segment matching actual cow/buffalo 3D mesh proportions
-      const isBuffalo = an.species === 'buffalo';
-      const rearOffset = isBuffalo ? -0.62 : -0.58;
-      const frontOffset = isBuffalo ? 0.72 : 0.66;
-      const bodyHalfWidth = isBuffalo ? 0.45 : 0.38;
-
-      const fx = Math.sin(an.rotY);
-      const fz = Math.cos(an.rotY);
-
-      const ax = an.x + fx * rearOffset;
-      const az = an.z + fz * rearOffset;
-      const bx = an.x + fx * frontOffset;
-      const bz = an.z + fz * frontOffset;
-
-      const segX = bx - ax;
-      const segZ = bz - az;
-      const segLenSq = segX * segX + segZ * segZ;
-
-      let t = 0.5;
-      if (segLenSq > 1e-6) {
-        t = ((pos.x - ax) * segX + (pos.z - az) * segZ) / segLenSq;
-        if (t < 0) t = 0;
-        else if (t > 1) t = 1;
-      }
-
-      const closestX = ax + segX * t;
-      const closestZ = az + segZ * t;
-      const dx = pos.x - closestX;
-      const dz = pos.z - closestZ;
-      const minDist = actorRadius + bodyHalfWidth;
-      const dSq = dx * dx + dz * dz;
-
-      if (dSq < minDist * minDist) {
-        collided = true;
-        if (dSq > 1e-6) {
-          const d = Math.sqrt(dSq);
-          const overlap = minDist - d;
-          pos.x += (dx / d) * overlap;
-          pos.z += (dz / d) * overlap;
-        } else {
-          // Fallback push perpendicular to animal flank
-          pos.x += fz * minDist;
-          pos.z -= fx * minDist;
-        }
-      }
+      const hit = resolveLargeAnimalCapsuleCollision(pos, actorRadius, {
+        species: an.species,
+        x: an.x,
+        z: an.z,
+        rotY: an.rotY,
+        isResting: an.state === 'rest',
+        scale: an.rig.root.scale.x || 1,
+      });
+      if (hit) collided = true;
     }
 
     return collided;

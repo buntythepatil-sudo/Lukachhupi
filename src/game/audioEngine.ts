@@ -1,3 +1,10 @@
+import {
+  computeFootstepDistanceGain,
+  computeStepIntervalSeconds,
+  FootstepEnvironment,
+  NearbyAudioActor,
+  REMOTE_FOOTSTEP_MAX_DISTANCE,
+} from './footstepSurface';
 import { AudioSettings, CharacterAnimState, GamePhase } from './types';
 
 export function createDefaultAudioSettings(): AudioSettings {
@@ -70,6 +77,8 @@ export class VillageAudioEngine {
   private ambienceGain: GainNode | null = null;
   private delayNode: DelayNode | null = null;
   private delayFeedback: GainNode | null = null;
+  private indoorDelayNode: DelayNode | null = null;
+  private indoorEchoFeedback: GainNode | null = null;
 
   private whiteNoise: AudioBuffer | null = null;
   private pinkNoise: AudioBuffer | null = null;
@@ -85,6 +94,19 @@ export class VillageAudioEngine {
   // Schedulers & timers
   private footstepTimer = 0;
   private stepToggle = false;
+  private localWasMoving = false;
+  private remoteFootsteps = new Map<
+    string,
+    {
+      timer: number;
+      alt: boolean;
+      wasGrounded: boolean;
+      lastY: number;
+      lastPlayedAt: number;
+    }
+  >();
+  private recentStepTimes: number[] = [];
+  private lastRemoteStepAt = 0;
   private musicBeatTimer = 0.08;
   private musicPhraseIdx = 0;
   private musicNoteIdx = 0;
@@ -268,6 +290,25 @@ export class VillageAudioEngine {
         delayFilter.connect(delayWet);
         delayWet.connect(masterGain);
 
+        // Lightweight shared indoor echo bus (school corridors, haveli halls, house rooms)
+        // Routed into sfxGain so it automatically respects SFX volume and mute settings.
+        const indoorDelayNode = ctx.createDelay(0.4);
+        indoorDelayNode.delayTime.value = 0.108;
+        const indoorFilter = ctx.createBiquadFilter();
+        indoorFilter.type = 'bandpass';
+        indoorFilter.frequency.value = 1580;
+        indoorFilter.Q.value = 0.72;
+        const indoorEchoFeedback = ctx.createGain();
+        indoorEchoFeedback.gain.value = 0.22;
+        const indoorEchoWet = ctx.createGain();
+        indoorEchoWet.gain.value = 0.32;
+
+        indoorDelayNode.connect(indoorFilter);
+        indoorFilter.connect(indoorEchoFeedback);
+        indoorEchoFeedback.connect(indoorDelayNode);
+        indoorFilter.connect(indoorEchoWet);
+        indoorEchoWet.connect(sfxGain);
+
         musicGain.connect(masterGain);
         sfxGain.connect(masterGain);
         ambienceGain.connect(sfxGain);
@@ -281,6 +322,8 @@ export class VillageAudioEngine {
         this.ambienceGain = ambienceGain;
         this.delayNode = delayNode;
         this.delayFeedback = delayFeedback;
+        this.indoorDelayNode = indoorDelayNode;
+        this.indoorEchoFeedback = indoorEchoFeedback;
 
         this.buildNoiseBuffers(ctx);
         this.applyVolumes(true);
@@ -434,6 +477,14 @@ export class VillageAudioEngine {
   // ---------------------------------------------------------------------------
   // Per-frame Tick: Music Sequencer + Organic Village Ambience + Footsteps
   // ---------------------------------------------------------------------------
+  public resetFootstepTrackers(): void {
+    this.footstepTimer = 0.05;
+    this.localWasMoving = false;
+    this.remoteFootsteps.clear();
+    this.recentStepTimes = [];
+    this.lastRemoteStepAt = 0;
+  }
+
   public update(
     dt: number,
     phase: GamePhase,
@@ -442,6 +493,9 @@ export class VillageAudioEngine {
     playerAnimState: CharacterAnimState,
     playerMoveSpeed: number,
     listenerY = 0,
+    localSurfaceEnv?: FootstepEnvironment,
+    nearbyActors?: NearbyAudioActor[],
+    resolveSurface?: (x: number, y: number, z: number) => FootstepEnvironment,
   ): void {
     if (this.disposed || !this.ctx || this.ctx.state !== 'running') return;
 
@@ -449,7 +503,34 @@ export class VillageAudioEngine {
     this.updateVillageAmbience(dt, listenerX, listenerZ);
 
     if (phase === 'playing') {
-      this.updateFootsteps(dt, playerAnimState, playerMoveSpeed, listenerY);
+      const fallbackEnv: FootstepEnvironment = localSurfaceEnv ?? {
+        surface:
+          this.activeLevelId === 6
+            ? listenerY >= 2.1 && listenerY < 5.3
+              ? 'wood'
+              : 'haveli_interior'
+            : this.activeLevelId === 2
+              ? 'school_corridor'
+              : 'dirt',
+        indoors: this.activeLevelId === 6 || this.activeLevelId === 2,
+        echoLevel: this.activeLevelId === 6 ? 0.5 : this.activeLevelId === 2 ? 0.4 : 0,
+      };
+      this.updateFootsteps(dt, playerAnimState, playerMoveSpeed, fallbackEnv);
+
+      if (nearbyActors && nearbyActors.length > 0 && resolveSurface) {
+        this.updateNearbyActorAudio(
+          dt,
+          listenerX,
+          listenerY,
+          listenerZ,
+          nearbyActors,
+          resolveSurface,
+        );
+      } else if (this.remoteFootsteps.size > 0) {
+        this.remoteFootsteps.clear();
+      }
+    } else if (this.localWasMoving || this.remoteFootsteps.size > 0) {
+      this.resetFootstepTrackers();
     }
   }
 
@@ -2165,120 +2246,615 @@ export class VillageAudioEngine {
   }
 
   // ---------------------------------------------------------------------------
-  // 2. Dynamic Footsteps (Walking vs Running vs Sneaking)
+  // 2. Realistic Environment-Specific Footsteps, Jumps, Landings & Multiplayer Audio
   // ---------------------------------------------------------------------------
+  private canPlayStepVoice(isRemote: boolean): boolean {
+    if (!this.ctx || !this.sfxGain || this.settings.muted || this.settings.sfxVolume <= 0.001) {
+      return false;
+    }
+    const now = this.ctx.currentTime;
+    // Prune step timestamps older than 120ms
+    while (this.recentStepTimes.length > 0 && now - this.recentStepTimes[0] > 0.12) {
+      this.recentStepTimes.shift();
+    }
+    if (isRemote) {
+      // Prevent simultaneous remote footsteps from overlapping or glitching on Android
+      if (now - this.lastRemoteStepAt < 0.048) return false;
+      if (this.recentStepTimes.length >= 4) return false;
+      this.lastRemoteStepAt = now;
+    } else {
+      // Local player always gets priority, capped only against extreme frame spikes
+      if (this.recentStepTimes.length >= 6) return false;
+    }
+    this.recentStepTimes.push(now);
+    return true;
+  }
+
   private updateFootsteps(
     dt: number,
     animState: CharacterAnimState,
     moveSpeed: number,
-    listenerY = 0,
+    env: FootstepEnvironment,
   ): void {
-    if (
-      moveSpeed < 0.2 ||
-      (animState !== 'walk' && animState !== 'run' && animState !== 'sneak')
-    ) {
-      this.footstepTimer = Math.min(this.footstepTimer, 0.08);
+    const isMoving =
+      moveSpeed >= 0.18 &&
+      (animState === 'walk' || animState === 'run' || animState === 'sneak');
+
+    // Stop footsteps immediately the moment the player stops moving or leaves the ground
+    if (!isMoving) {
+      this.localWasMoving = false;
+      this.footstepTimer = 0.055;
       return;
+    }
+
+    if (!this.localWasMoving) {
+      this.localWasMoving = true;
+      // Short responsive lead-in so first step feels crisp without double-triggering
+      this.footstepTimer = Math.min(this.footstepTimer, 0.065);
     }
 
     this.footstepTimer -= dt;
     if (this.footstepTimer > 0) return;
 
     this.stepToggle = !this.stepToggle;
+    const mode: 'walk' | 'run' | 'sneak' =
+      animState === 'run'
+        ? 'run'
+        : animState === 'sneak'
+          ? 'sneak'
+          : 'walk';
+    this.footstepTimer = computeStepIntervalSeconds(mode, moveSpeed);
+    this.playSurfaceFootstep(mode, this.stepToggle, env, 1.0, false);
+  }
 
-    if (animState === 'run') {
-      this.footstepTimer = 0.27;
-      this.playFootstep('run', this.stepToggle, listenerY);
-    } else if (animState === 'sneak') {
-      this.footstepTimer = 0.54;
-      this.playFootstep('sneak', this.stepToggle, listenerY);
-    } else {
-      this.footstepTimer = 0.42;
-      this.playFootstep('walk', this.stepToggle, listenerY);
+  private updateNearbyActorAudio(
+    dt: number,
+    listenerX: number,
+    listenerY: number,
+    listenerZ: number,
+    nearbyActors: NearbyAudioActor[],
+    resolveSurface: (x: number, y: number, z: number) => FootstepEnvironment,
+  ): void {
+    if (
+      !this.ctx ||
+      !this.sfxGain ||
+      this.settings.muted ||
+      this.settings.sfxVolume <= 0.001
+    ) {
+      return;
+    }
+
+    const activeIds = new Set<string>();
+    const audibleCandidates: Array<{ actor: NearbyAudioActor; dist: number }> = [];
+
+    for (let i = 0; i < nearbyActors.length; i++) {
+      const a = nearbyActors[i];
+      activeIds.add(a.id);
+      const dist = Math.hypot(
+        a.x - listenerX,
+        (a.y - listenerY) * 1.4,
+        a.z - listenerZ,
+      );
+      if (dist < REMOTE_FOOTSTEP_MAX_DISTANCE) {
+        audibleCandidates.push({ actor: a, dist });
+      } else {
+        const existing = this.remoteFootsteps.get(a.id);
+        if (existing) {
+          existing.wasGrounded = a.grounded;
+          existing.lastY = a.y;
+          existing.timer = 0.08;
+        }
+      }
+    }
+
+    // Prune players who left the room or were caught
+    for (const id of this.remoteFootsteps.keys()) {
+      if (!activeIds.has(id)) {
+        this.remoteFootsteps.delete(id);
+      }
+    }
+
+    if (audibleCandidates.length === 0) return;
+
+    // Prioritize closest 4 nearby players for clean Android performance
+    if (audibleCandidates.length > 4) {
+      audibleCandidates.sort((a, b) => a.dist - b.dist);
+      audibleCandidates.length = 4;
+    }
+
+    const now = this.ctx.currentTime;
+    for (let i = 0; i < audibleCandidates.length; i++) {
+      const { actor, dist } = audibleCandidates[i];
+      const gainScale = computeFootstepDistanceGain(dist);
+      if (gainScale <= 0.025) continue;
+
+      let tracker = this.remoteFootsteps.get(actor.id);
+      if (!tracker) {
+        tracker = {
+          timer: 0.06 + (i % 3) * 0.04,
+          alt: i % 2 === 0,
+          wasGrounded: actor.grounded,
+          lastY: actor.y,
+          lastPlayedAt: 0,
+        };
+        this.remoteFootsteps.set(actor.id, tracker);
+      }
+
+      // Detect remote jump takeoff and landing from synced vertical state (zero extra packets)
+      if (tracker.wasGrounded && !actor.grounded && actor.animState === 'jump') {
+        const env = resolveSurface(actor.x, actor.y, actor.z);
+        this.playJump(env, gainScale * 0.82, true);
+      } else if (!tracker.wasGrounded && actor.grounded) {
+        const dropHeight = Math.max(0, tracker.lastY - actor.y);
+        const estimatedImpact = Math.min(11, 4.2 + dropHeight * 2.4);
+        const env = resolveSurface(actor.x, actor.y, actor.z);
+        this.playLand(env, estimatedImpact, gainScale * 0.88, true);
+      }
+      tracker.wasGrounded = actor.grounded;
+      tracker.lastY = actor.y;
+
+      const isMoving =
+        actor.grounded &&
+        actor.moveSpeed >= 0.22 &&
+        (actor.animState === 'walk' ||
+          actor.animState === 'run' ||
+          actor.animState === 'sneak');
+
+      if (!isMoving) {
+        tracker.timer = 0.07;
+        continue;
+      }
+
+      tracker.timer -= dt;
+      if (tracker.timer > 0) continue;
+
+      // Per-actor minimum cadence guard prevents duplicate rapid-fire steps
+      if (now - tracker.lastPlayedAt < 0.21) {
+        tracker.timer = 0.05;
+        continue;
+      }
+
+      const mode: 'walk' | 'run' | 'sneak' =
+        actor.animState === 'run' || actor.moveSpeed > 3.6
+          ? 'run'
+          : actor.animState === 'sneak'
+            ? 'sneak'
+            : 'walk';
+      tracker.timer = computeStepIntervalSeconds(mode, actor.moveSpeed);
+      tracker.alt = !tracker.alt;
+      tracker.lastPlayedAt = now;
+
+      const env = resolveSurface(actor.x, actor.y, actor.z);
+      this.playSurfaceFootstep(mode, tracker.alt, env, gainScale, true);
     }
   }
 
-  private playFootstep(
+  private routeIndoorEcho(
+    sourceNode: AudioNode,
+    echoLevel: number,
+    isHaveli = false,
+  ): void {
+    if (!this.ctx || echoLevel <= 0.02 || !this.indoorDelayNode) return;
+    const send = this.ctx.createGain();
+    send.gain.value = Math.min(0.65, echoLevel);
+    sourceNode.connect(send);
+    send.connect(this.indoorDelayNode);
+
+    // Subtle longer gothic reflection inside Bhutiya Haveli halls (still gated by sfxVolume/mute)
+    if (isHaveli && this.delayNode && this.settings.sfxVolume > 0.01 && !this.settings.muted) {
+      const hallSend = this.ctx.createGain();
+      hallSend.gain.value = 0.16 * this.settings.sfxVolume;
+      sourceNode.connect(hallSend);
+      hallSend.connect(this.delayNode);
+    }
+  }
+
+  public playSurfaceFootstep(
     mode: 'walk' | 'run' | 'sneak',
     alt: boolean,
-    listenerY = 0,
+    env: FootstepEnvironment,
+    volumeScale = 1.0,
+    isRemote = false,
   ): void {
-    if (!this.ctx || !this.sfxGain || !this.pinkNoise) return;
+    if (!this.ctx || !this.sfxGain || !this.pinkNoise || !this.whiteNoise) return;
+    if (volumeScale <= 0.02) return;
+    if (!this.canPlayStepVoice(isRemote)) return;
+
     const now = this.ctx.currentTime;
-    const pitchJitter = alt ? 1.06 : 0.94;
-    const inHaveli = this.activeLevelId === 6;
-    const onWoodBalcony = inHaveli && listenerY >= 2.2 && listenerY < 5.4;
+    const pitchJitter = (alt ? 1.055 : 0.945) * (0.97 + Math.random() * 0.06);
+    const modeAmp =
+      mode === 'run' ? 1.0 : mode === 'sneak' ? 0.34 : 0.66;
+    const amp = modeAmp * Math.min(1.0, volumeScale);
+    const surface = env.surface;
 
-    // 1. Dusty dirt / hollow haveli stone or wood scuff texture
-    const noise = this.ctx.createBufferSource();
-    noise.buffer = this.pinkNoise;
+    // Master output node for this single step (allows clean echo send + balanced leveling)
+    const stepBus = this.ctx.createGain();
+    stepBus.gain.value = 1.0;
+    stepBus.connect(this.sfxGain);
 
+    const effectiveEcho =
+      mode === 'sneak' ? env.echoLevel * 0.35 : env.echoLevel;
+    if (effectiveEcho > 0.03) {
+      this.routeIndoorEcho(
+        stepBus,
+        effectiveEcho,
+        surface === 'haveli_interior',
+      );
+    }
+
+    if (surface === 'grass') {
+      // Soft natural grass swish + muffled cushioned earth body
+      const swish = this.ctx.createBufferSource();
+      swish.buffer = this.whiteNoise;
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime((mode === 'run' ? 3150 : 2550) * pitchJitter, now);
+      bp.frequency.exponentialRampToValueAtTime(1650 * pitchJitter, now + 0.085);
+      bp.Q.value = 1.35;
+      const sEnv = this.ctx.createGain();
+      sEnv.gain.setValueAtTime(0.0001, now);
+      sEnv.gain.linearRampToValueAtTime(0.16 * amp, now + 0.018);
+      sEnv.gain.exponentialRampToValueAtTime(0.0001, now + (mode === 'run' ? 0.11 : 0.095));
+      swish.connect(bp);
+      bp.connect(sEnv);
+      sEnv.connect(stepBus);
+      swish.start(now, Math.random() * 1.4, 0.13);
+
+      const earth = this.ctx.createOscillator();
+      earth.type = 'sine';
+      earth.frequency.setValueAtTime(86 * pitchJitter, now);
+      earth.frequency.exponentialRampToValueAtTime(44, now + 0.06);
+      const eEnv = this.ctx.createGain();
+      eEnv.gain.setValueAtTime(0.0001, now);
+      eEnv.gain.linearRampToValueAtTime(0.1 * amp, now + 0.008);
+      eEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.07);
+      earth.connect(eEnv);
+      eEnv.connect(stepBus);
+      earth.start(now);
+      earth.stop(now + 0.08);
+      return;
+    }
+
+    if (surface === 'water') {
+      // Subtle shallow water splash + tiny liquid droplet shimmer
+      const splash = this.ctx.createBufferSource();
+      splash.buffer = this.whiteNoise;
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(1050 * pitchJitter, now);
+      bp.frequency.exponentialRampToValueAtTime((mode === 'run' ? 3100 : 2350) * pitchJitter, now + 0.07);
+      bp.frequency.exponentialRampToValueAtTime(980, now + 0.15);
+      bp.Q.value = 1.6;
+      const wEnv = this.ctx.createGain();
+      wEnv.gain.setValueAtTime(0.0001, now);
+      wEnv.gain.linearRampToValueAtTime(0.22 * amp, now + 0.014);
+      wEnv.gain.exponentialRampToValueAtTime(0.0001, now + (mode === 'run' ? 0.17 : 0.13));
+      splash.connect(bp);
+      bp.connect(wEnv);
+      wEnv.connect(stepBus);
+      splash.start(now, Math.random() * 1.3, 0.19);
+
+      // Soft droplet plip
+      const drop = this.ctx.createOscillator();
+      drop.type = 'sine';
+      const dropFreq = (920 + Math.random() * 520) * pitchJitter;
+      drop.frequency.setValueAtTime(dropFreq * 0.72, now + 0.022);
+      drop.frequency.exponentialRampToValueAtTime(dropFreq * 1.25, now + 0.062);
+      const dEnv = this.ctx.createGain();
+      dEnv.gain.setValueAtTime(0.0001, now + 0.02);
+      dEnv.gain.linearRampToValueAtTime(0.065 * amp, now + 0.032);
+      dEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
+      drop.connect(dEnv);
+      dEnv.connect(stepBus);
+      drop.start(now + 0.02);
+      drop.stop(now + 0.085);
+      return;
+    }
+
+    if (surface === 'wood') {
+      // Hollow resonant wooden plank step + natural subtle creak
+      const knock = this.ctx.createOscillator();
+      knock.type = 'triangle';
+      knock.frequency.setValueAtTime((mode === 'run' ? 172 : 142) * pitchJitter, now);
+      knock.frequency.exponentialRampToValueAtTime(64, now + 0.075);
+      const kEnv = this.ctx.createGain();
+      kEnv.gain.setValueAtTime(0.0001, now);
+      kEnv.gain.linearRampToValueAtTime(0.24 * amp, now + 0.005);
+      kEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.09);
+      knock.connect(kEnv);
+      kEnv.connect(stepBus);
+      knock.start(now);
+      knock.stop(now + 0.1);
+
+      // Dry wooden plank slap texture
+      const grain = this.ctx.createBufferSource();
+      grain.buffer = this.pinkNoise;
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(780 * pitchJitter, now);
+      bp.Q.value = 2.4;
+      const gEnv = this.ctx.createGain();
+      gEnv.gain.setValueAtTime(0.0001, now);
+      gEnv.gain.linearRampToValueAtTime(0.18 * amp, now + 0.006);
+      gEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.065);
+      grain.connect(bp);
+      bp.connect(gEnv);
+      gEnv.connect(stepBus);
+      grain.start(now, Math.random() * 1.4, 0.085);
+
+      // Subtle authentic wooden board creak
+      if (mode !== 'sneak') {
+        const creakChance =
+          this.activeLevelId === 6 ? 0.34 : mode === 'run' ? 0.24 : 0.18;
+        if (Math.random() < creakChance) {
+          this.playHaveliWoodCreak(0.085 * amp, stepBus);
+        }
+      }
+      return;
+    }
+
+    if (
+      surface === 'stone' ||
+      surface === 'temple_steps' ||
+      surface === 'school_corridor'
+    ) {
+      // Crisp hard mineral / terrazzo sole tap + tight solid body
+      const isTemple = surface === 'temple_steps';
+      const isCorridor = surface === 'school_corridor';
+
+      const tap = this.ctx.createBufferSource();
+      tap.buffer = this.whiteNoise;
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      const tapFreq = isTemple ? 2750 : isCorridor ? 2350 : 2150;
+      bp.frequency.setValueAtTime(tapFreq * pitchJitter, now);
+      bp.Q.value = isTemple ? 2.4 : 1.9;
+      const nEnv = this.ctx.createGain();
+      nEnv.gain.setValueAtTime(0.0001, now);
+      nEnv.gain.linearRampToValueAtTime((isCorridor ? 0.2 : 0.21) * amp, now + 0.004);
+      nEnv.gain.exponentialRampToValueAtTime(0.0001, now + (mode === 'run' ? 0.058 : 0.048));
+      tap.connect(bp);
+      bp.connect(nEnv);
+      nEnv.connect(stepBus);
+      tap.start(now, Math.random() * 1.4, 0.075);
+
+      const body = this.ctx.createOscillator();
+      body.type = isTemple ? 'triangle' : 'sine';
+      const bodyStart = isTemple ? 235 : isCorridor ? 195 : 182;
+      body.frequency.setValueAtTime(bodyStart * pitchJitter, now);
+      body.frequency.exponentialRampToValueAtTime(isTemple ? 88 : 68, now + 0.052);
+      const bEnv = this.ctx.createGain();
+      bEnv.gain.setValueAtTime(0.0001, now);
+      bEnv.gain.linearRampToValueAtTime(0.18 * amp, now + 0.004);
+      bEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.062);
+      body.connect(bEnv);
+      bEnv.connect(stepBus);
+      body.start(now);
+      body.stop(now + 0.072);
+      return;
+    }
+
+    if (surface === 'haveli_interior') {
+      // Eerie cold hollow Haveli indoor step + dusty stone grit + occasional antique creak
+      const grit = this.ctx.createBufferSource();
+      grit.buffer = this.pinkNoise;
+      const bp = this.ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime((mode === 'run' ? 1460 : 1120) * pitchJitter, now);
+      bp.Q.value = 1.9;
+      const gEnv = this.ctx.createGain();
+      gEnv.gain.setValueAtTime(0.0001, now);
+      gEnv.gain.linearRampToValueAtTime(0.21 * amp, now + 0.008);
+      gEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.085);
+      grit.connect(bp);
+      bp.connect(gEnv);
+      gEnv.connect(stepBus);
+      grit.start(now, Math.random() * 1.5, 0.11);
+
+      const hollow = this.ctx.createOscillator();
+      hollow.type = 'triangle';
+      hollow.frequency.setValueAtTime((mode === 'run' ? 148 : 118) * pitchJitter, now);
+      hollow.frequency.exponentialRampToValueAtTime(52, now + 0.078);
+      const hEnv = this.ctx.createGain();
+      hEnv.gain.setValueAtTime(0.0001, now);
+      hEnv.gain.linearRampToValueAtTime(0.2 * amp, now + 0.006);
+      hEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.088);
+      hollow.connect(hEnv);
+      hEnv.connect(stepBus);
+      hollow.start(now);
+      hollow.stop(now + 0.1);
+
+      if (mode !== 'sneak' && Math.random() < 0.14) {
+        this.playHaveliWoodCreak(0.065 * amp, stepBus);
+      }
+      return;
+    }
+
+    // Default: 'dirt' — Soft dusty village road footsteps
+    const dust = this.ctx.createBufferSource();
+    dust.buffer = this.pinkNoise;
     const filter = this.ctx.createBiquadFilter();
     filter.type = 'bandpass';
+    filter.frequency.setValueAtTime((mode === 'run' ? 1520 : 1080) * pitchJitter, now);
+    filter.Q.value = 1.3;
     const nEnv = this.ctx.createGain();
-
-    if (mode === 'run') {
-      filter.frequency.setValueAtTime((inHaveli ? 1480 : 1750) * pitchJitter, now);
-      filter.Q.value = inHaveli ? 1.6 : 1.2;
-      nEnv.gain.setValueAtTime(0.0001, now);
-      nEnv.gain.linearRampToValueAtTime(0.28, now + 0.01);
-      nEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.095);
-    } else if (mode === 'sneak') {
-      filter.frequency.setValueAtTime(680 * pitchJitter, now);
-      filter.Q.value = 1.8;
-      nEnv.gain.setValueAtTime(0.0001, now);
-      nEnv.gain.linearRampToValueAtTime(0.075, now + 0.02);
-      nEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.08);
-    } else {
-      filter.frequency.setValueAtTime((inHaveli ? 1080 : 1250) * pitchJitter, now);
-      filter.Q.value = inHaveli ? 1.8 : 1.4;
-      nEnv.gain.setValueAtTime(0.0001, now);
-      nEnv.gain.linearRampToValueAtTime(0.17, now + 0.012);
-      nEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.078);
-    }
-
-    noise.connect(filter);
+    nEnv.gain.setValueAtTime(0.0001, now);
+    nEnv.gain.linearRampToValueAtTime(0.22 * amp, now + 0.011);
+    nEnv.gain.exponentialRampToValueAtTime(0.0001, now + (mode === 'run' ? 0.092 : 0.078));
+    dust.connect(filter);
     filter.connect(nEnv);
-    nEnv.connect(this.sfxGain);
-    if (inHaveli && this.delayNode && mode !== 'sneak') {
-      nEnv.connect(this.delayNode);
-    }
-    noise.start(now, Math.random() * 1.5, 0.12);
+    nEnv.connect(stepBus);
+    dust.start(now, Math.random() * 1.5, 0.11);
 
-    // 2. Ground heel thump body (deeper wooden resonance on upper Haveli balconies)
     const thump = this.ctx.createOscillator();
-    thump.type = onWoodBalcony ? 'triangle' : 'sine';
+    thump.type = 'sine';
+    thump.frequency.setValueAtTime((mode === 'run' ? 124 : 96) * pitchJitter, now);
+    thump.frequency.exponentialRampToValueAtTime(48, now + 0.065);
     const tEnv = this.ctx.createGain();
-    if (mode === 'run') {
-      thump.frequency.setValueAtTime((onWoodBalcony ? 155 : 132) * pitchJitter, now);
-      thump.frequency.exponentialRampToValueAtTime(52, now + 0.075);
-      tEnv.gain.setValueAtTime(0.0001, now);
-      tEnv.gain.linearRampToValueAtTime(0.22, now + 0.006);
-      tEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.085);
-    } else if (mode === 'sneak') {
-      thump.frequency.setValueAtTime(78 * pitchJitter, now);
-      thump.frequency.exponentialRampToValueAtTime(48, now + 0.055);
-      tEnv.gain.setValueAtTime(0.0001, now);
-      tEnv.gain.linearRampToValueAtTime(0.055, now + 0.01);
-      tEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
-    } else {
-      thump.frequency.setValueAtTime((onWoodBalcony ? 124 : 102) * pitchJitter, now);
-      thump.frequency.exponentialRampToValueAtTime(50, now + 0.065);
-      tEnv.gain.setValueAtTime(0.0001, now);
-      tEnv.gain.linearRampToValueAtTime(0.13, now + 0.008);
-      tEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.075);
-    }
+    tEnv.gain.setValueAtTime(0.0001, now);
+    tEnv.gain.linearRampToValueAtTime(0.17 * amp, now + 0.007);
+    tEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.076);
     thump.connect(tEnv);
-    tEnv.connect(this.sfxGain);
+    tEnv.connect(stepBus);
     thump.start(now);
-    thump.stop(now + 0.095);
+    thump.stop(now + 0.088);
+  }
 
-    // 3. Occasional subtle wooden floorboard creak when moving on Haveli wooden floors
-    if (inHaveli && mode !== 'sneak') {
-      const creakChance = onWoodBalcony ? 0.28 : 0.09;
-      if (Math.random() < creakChance) {
-        this.playHaveliWoodCreak(mode === 'run' ? 0.11 : 0.07, this.sfxGain);
-      }
+  /** Natural surface-aware takeoff sound when jumping */
+  public playJump(
+    env: FootstepEnvironment,
+    volumeScale = 1.0,
+    isRemote = false,
+  ): void {
+    if (!this.ctx || !this.sfxGain || !this.pinkNoise) return;
+    if (volumeScale <= 0.03) return;
+    if (!this.canPlayStepVoice(isRemote)) return;
+
+    const now = this.ctx.currentTime;
+    const amp = Math.min(1.0, volumeScale);
+
+    // 1. Light upward cloth & air push-off swoosh
+    const whoosh = this.ctx.createBufferSource();
+    whoosh.buffer = this.pinkNoise;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(520, now);
+    bp.frequency.exponentialRampToValueAtTime(1480, now + 0.11);
+    bp.Q.value = 1.4;
+    const wEnv = this.ctx.createGain();
+    wEnv.gain.setValueAtTime(0.0001, now);
+    wEnv.gain.linearRampToValueAtTime(0.14 * amp, now + 0.02);
+    wEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.13);
+    whoosh.connect(bp);
+    bp.connect(wEnv);
+    wEnv.connect(this.sfxGain);
+    whoosh.start(now, Math.random() * 1.2, 0.15);
+
+    // 2. Subtle surface push-off impulse (water splash / wood tap / stone push)
+    const push = this.ctx.createOscillator();
+    push.type = env.surface === 'wood' ? 'triangle' : 'sine';
+    const baseF =
+      env.surface === 'stone' || env.surface === 'temple_steps'
+        ? 165
+        : env.surface === 'wood'
+          ? 140
+          : 112;
+    push.frequency.setValueAtTime(baseF, now);
+    push.frequency.exponentialRampToValueAtTime(baseF * 1.45, now + 0.065);
+    const pEnv = this.ctx.createGain();
+    pEnv.gain.setValueAtTime(0.0001, now);
+    pEnv.gain.linearRampToValueAtTime(0.11 * amp, now + 0.008);
+    pEnv.gain.exponentialRampToValueAtTime(0.0001, now + 0.085);
+    push.connect(pEnv);
+    pEnv.connect(this.sfxGain);
+    push.start(now);
+    push.stop(now + 0.095);
+  }
+
+  /** Weighted surface-aware landing sound scaled by fall impact speed */
+  public playLand(
+    env: FootstepEnvironment,
+    impactSpeed: number,
+    volumeScale = 1.0,
+    isRemote = false,
+  ): void {
+    if (!this.ctx || !this.sfxGain || !this.pinkNoise || !this.whiteNoise) return;
+    if (volumeScale <= 0.03) return;
+    if (!this.canPlayStepVoice(isRemote)) return;
+
+    const now = this.ctx.currentTime;
+    const intensity = Math.max(0.45, Math.min(1.15, impactSpeed / 7.5));
+    const amp = intensity * Math.min(1.0, volumeScale);
+
+    const landBus = this.ctx.createGain();
+    landBus.gain.value = 1.0;
+    landBus.connect(this.sfxGain);
+    if (env.echoLevel > 0.03) {
+      this.routeIndoorEcho(
+        landBus,
+        Math.min(0.65, env.echoLevel * 1.15),
+        env.surface === 'haveli_interior',
+      );
+    }
+
+    // Double-foot staggered impact (0ms & 28ms) feels much more physical than a single thump
+    const offsets = [0, 0.028];
+    for (let i = 0; i < offsets.length; i++) {
+      const t = now + offsets[i];
+      const footAmp = i === 0 ? amp : amp * 0.62;
+
+      const thump = this.ctx.createOscillator();
+      thump.type = env.surface === 'wood' ? 'triangle' : 'sine';
+      const f0 =
+        env.surface === 'stone' ||
+        env.surface === 'temple_steps' ||
+        env.surface === 'school_corridor'
+          ? 168
+          : env.surface === 'wood'
+            ? 148
+            : env.surface === 'grass'
+              ? 88
+              : 112;
+      thump.frequency.setValueAtTime(f0 * (i === 0 ? 1.0 : 0.91), t);
+      thump.frequency.exponentialRampToValueAtTime(42, t + 0.095);
+      const tEnv = this.ctx.createGain();
+      tEnv.gain.setValueAtTime(0.0001, t);
+      tEnv.gain.linearRampToValueAtTime(0.24 * footAmp, t + 0.006);
+      tEnv.gain.exponentialRampToValueAtTime(0.0001, t + 0.11);
+      thump.connect(tEnv);
+      tEnv.connect(landBus);
+      thump.start(t);
+      thump.stop(t + 0.125);
+    }
+
+    // Surface landing texture burst
+    const tex = this.ctx.createBufferSource();
+    tex.buffer =
+      env.surface === 'water' ||
+      env.surface === 'grass' ||
+      env.surface === 'stone' ||
+      env.surface === 'temple_steps'
+        ? this.whiteNoise
+        : this.pinkNoise;
+    const bp = this.ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    if (env.surface === 'water') {
+      bp.frequency.setValueAtTime(980, now);
+      bp.frequency.exponentialRampToValueAtTime(2950, now + 0.08);
+      bp.frequency.exponentialRampToValueAtTime(860, now + 0.22);
+      bp.Q.value = 1.4;
+    } else if (env.surface === 'grass') {
+      bp.frequency.setValueAtTime(2650, now);
+      bp.Q.value = 1.25;
+    } else if (
+      env.surface === 'stone' ||
+      env.surface === 'temple_steps' ||
+      env.surface === 'school_corridor'
+    ) {
+      bp.frequency.setValueAtTime(2150, now);
+      bp.Q.value = 1.8;
+    } else {
+      bp.frequency.setValueAtTime(1080, now);
+      bp.Q.value = 1.3;
+    }
+    const nDur = env.surface === 'water' ? 0.24 : 0.12;
+    const nEnv = this.ctx.createGain();
+    nEnv.gain.setValueAtTime(0.0001, now);
+    nEnv.gain.linearRampToValueAtTime(
+      (env.surface === 'water' ? 0.28 : 0.22) * amp,
+      now + 0.01,
+    );
+    nEnv.gain.exponentialRampToValueAtTime(0.0001, now + nDur);
+    tex.connect(bp);
+    bp.connect(nEnv);
+    nEnv.connect(landBus);
+    tex.start(now, Math.random() * 1.2, nDur + 0.03);
+
+    if (
+      (env.surface === 'wood' || env.surface === 'haveli_interior') &&
+      intensity > 0.65
+    ) {
+      this.playHaveliWoodCreak(0.11 * amp, landBus);
     }
   }
 
@@ -2586,6 +3162,10 @@ export class VillageAudioEngine {
     if (this.delayFeedback) {
       this.delayFeedback.gain.value = 0;
     }
+    if (this.indoorEchoFeedback) {
+      this.indoorEchoFeedback.gain.value = 0;
+    }
+    this.resetFootstepTrackers();
 
     if (this.ctx) {
       void this.ctx.close();

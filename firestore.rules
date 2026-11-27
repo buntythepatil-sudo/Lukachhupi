@@ -92,8 +92,8 @@ service cloud.firestore {
 
     function isValidLevelStarsMap(starsMap) {
       return starsMap is map &&
-        starsMap.size() <= 8 &&
-        starsMap.keys().hasOnly(['1', '2', '3', '4', '5', '6', '7', '8']) &&
+        starsMap.size() <= 15 &&
+        starsMap.keys().hasOnly(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15']) &&
         isValidStarEntry(starsMap, '1') &&
         isValidStarEntry(starsMap, '2') &&
         isValidStarEntry(starsMap, '3') &&
@@ -101,19 +101,26 @@ service cloud.firestore {
         isValidStarEntry(starsMap, '5') &&
         isValidStarEntry(starsMap, '6') &&
         isValidStarEntry(starsMap, '7') &&
-        isValidStarEntry(starsMap, '8');
+        isValidStarEntry(starsMap, '8') &&
+        isValidStarEntry(starsMap, '9') &&
+        isValidStarEntry(starsMap, '10') &&
+        isValidStarEntry(starsMap, '11') &&
+        isValidStarEntry(starsMap, '12') &&
+        isValidStarEntry(starsMap, '13') &&
+        isValidStarEntry(starsMap, '14') &&
+        isValidStarEntry(starsMap, '15');
     }
 
     function isValidLevelEntry(levelsList, idx) {
       return levelsList.size() <= idx ||
         (levelsList[idx] is int &&
           levelsList[idx] >= 1 &&
-          levelsList[idx] <= 8);
+          levelsList[idx] <= 15);
     }
 
     function isValidCompletedLevelsList(levelsList) {
       return levelsList is list &&
-        levelsList.size() <= 8 &&
+        levelsList.size() <= 15 &&
         isValidLevelEntry(levelsList, 0) &&
         isValidLevelEntry(levelsList, 1) &&
         isValidLevelEntry(levelsList, 2) &&
@@ -121,7 +128,14 @@ service cloud.firestore {
         isValidLevelEntry(levelsList, 4) &&
         isValidLevelEntry(levelsList, 5) &&
         isValidLevelEntry(levelsList, 6) &&
-        isValidLevelEntry(levelsList, 7);
+        isValidLevelEntry(levelsList, 7) &&
+        isValidLevelEntry(levelsList, 8) &&
+        isValidLevelEntry(levelsList, 9) &&
+        isValidLevelEntry(levelsList, 10) &&
+        isValidLevelEntry(levelsList, 11) &&
+        isValidLevelEntry(levelsList, 12) &&
+        isValidLevelEntry(levelsList, 13) &&
+        isValidLevelEntry(levelsList, 14);
     }
 
     function isValidPlayerProfile(data) {
@@ -187,7 +201,7 @@ service cloud.firestore {
         data.bestWinStreak <= data.matchesWon &&
         data.unlockedLevel is int &&
         data.unlockedLevel >= 1 &&
-        data.unlockedLevel <= 8 &&
+        data.unlockedLevel <= 15 &&
         isValidCompletedLevelsList(data.completedLevels) &&
         isValidLevelStarsMap(data.levelStars) &&
         data.createdAt is timestamp &&
@@ -408,7 +422,7 @@ service cloud.firestore {
         isValidRoomCode(data.roomCode) &&
         data.levelId is int &&
         data.levelId >= 1 &&
-        data.levelId <= 8 &&
+        data.levelId <= 15 &&
         data.status in ['pending', 'accepted', 'dismissed'] &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
@@ -436,7 +450,7 @@ service cloud.firestore {
         isValidId(data.hostUid) &&
         data.levelId is int &&
         data.levelId >= 1 &&
-        data.levelId <= 8 &&
+        data.levelId <= 15 &&
         data.phase in ['lobby', 'playing', 'ended'] &&
         data.createdAt is timestamp &&
         data.updatedAt is timestamp;
